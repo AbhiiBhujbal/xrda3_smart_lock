@@ -265,17 +265,43 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
 
     setState(() => _actionLoading = true);
     try {
-      debugPrint("Sending WiFi unlock command...");
-      await TuyaFlutterHaSdk.replyRequestUnlock(
-          devId: widget.devId, open: true);
-      _showSnackBar('Lock opened via WiFi');
+      debugPrint("Sending WiFi unlock command via publishDps...");
+      // Send DP command to unlock via cloud (DP 1 = switch/motor)
+      await TuyaFlutterHaSdk.controlMatter(
+        devId: widget.devId,
+        dps: {'1': true},
+      );
+      _showSnackBar('Unlock command sent via WiFi');
       await Future.delayed(const Duration(seconds: 2));
       await _refreshStatus();
     } catch (e) {
       debugPrint("WiFi unlock failed: $e");
+      _showSnackBar('WiFi unlock failed: $e');
+    }
+    if (mounted) setState(() => _actionLoading = false);
+  }
+
+  Future<void> _wifiLock() async {
+    if (!_isOnline) {
       _showSnackBar(
-        'WiFi unlock failed. Ensure the lock is connected to WiFi.',
+        'Device is offline. WiFi lock requires cloud connection.',
       );
+      return;
+    }
+
+    setState(() => _actionLoading = true);
+    try {
+      debugPrint("Sending WiFi lock command via publishDps...");
+      await TuyaFlutterHaSdk.controlMatter(
+        devId: widget.devId,
+        dps: {'1': false},
+      );
+      _showSnackBar('Lock command sent via WiFi');
+      await Future.delayed(const Duration(seconds: 2));
+      await _refreshStatus();
+    } catch (e) {
+      debugPrint("WiFi lock failed: $e");
+      _showSnackBar('WiFi lock failed: $e');
     }
     if (mounted) setState(() => _actionLoading = false);
   }
@@ -475,16 +501,27 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
 
                   const SizedBox(height: 16),
 
-                  // ── BLE Controls ──
-                  Text('BLE Lock Control',
+                  // ── WiFi Lock Controls ──
+                  Text('Lock Control',
                       style: Theme.of(context).textTheme.titleMedium),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: 4),
+                  if (!_isOnline)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: Text(
+                        'Device is offline — controls unavailable',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              color: cs.error,
+                            ),
+                      ),
+                    ),
+                  const SizedBox(height: 4),
                   Row(
                     children: [
                       Expanded(
                         child: FilledButton.icon(
                           onPressed:
-                              _actionLoading ? null : _unlockBLE,
+                              (_actionLoading || !_isOnline) ? null : _wifiUnlock,
                           icon: const Icon(Icons.lock_open),
                           label: const Text('Unlock'),
                           style: FilledButton.styleFrom(
@@ -496,7 +533,7 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
                       Expanded(
                         child: OutlinedButton.icon(
                           onPressed:
-                              _actionLoading ? null : _lockBLE,
+                              (_actionLoading || !_isOnline) ? null : _wifiLock,
                           icon: const Icon(Icons.lock),
                           label: const Text('Lock'),
                           style: OutlinedButton.styleFrom(
@@ -509,39 +546,38 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
 
                   const SizedBox(height: 24),
 
-                  // ── WiFi Controls ──
-                  Text('WiFi Lock Control',
+                  // ── Dynamic Password ──
+                  Text('Dynamic Password',
                       style: Theme.of(context).textTheme.titleMedium),
-                  const SizedBox(height: 4),
-                  if (!_isOnline)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 8),
-                      child: Text(
-                        'Device is offline — WiFi controls unavailable',
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                              color: cs.error,
+                  const SizedBox(height: 8),
+                  Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Generate a one-time password to unlock via the lock keypad.',
+                            style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                                  color: cs.onSurfaceVariant,
+                                ),
+                          ),
+                          const SizedBox(height: 12),
+                          SizedBox(
+                            width: double.infinity,
+                            child: FilledButton.tonalIcon(
+                              onPressed: (_actionLoading || !_isOnline)
+                                  ? null
+                                  : _getDynamicPassword,
+                              icon: const Icon(Icons.password),
+                              label: const Text('Generate Password'),
+                              style: FilledButton.styleFrom(
+                                minimumSize: const Size(0, 48),
+                              ),
                             ),
+                          ),
+                        ],
                       ),
-                    ),
-                  const SizedBox(height: 4),
-                  FilledButton.icon(
-                    onPressed:
-                        (_actionLoading || !_isOnline) ? null : _wifiUnlock,
-                    icon: const Icon(Icons.lock_open),
-                    label: const Text('Remote Unlock (WiFi)'),
-                    style: FilledButton.styleFrom(
-                      minimumSize: const Size(double.infinity, 48),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  OutlinedButton.icon(
-                    onPressed: (_actionLoading || !_isOnline)
-                        ? null
-                        : _getDynamicPassword,
-                    icon: const Icon(Icons.password),
-                    label: const Text('Get Dynamic Password'),
-                    style: OutlinedButton.styleFrom(
-                      minimumSize: const Size(double.infinity, 48),
                     ),
                   ),
 
