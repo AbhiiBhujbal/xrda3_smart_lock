@@ -128,11 +128,31 @@ class _DevicePairingScreenState extends State<DevicePairingScreen> {
     final deviceType = _discoveredDevice!['deviceType'] as int?;
     final address = _discoveredDevice!['address']?.toString();
     final flag = _discoveredDevice!['flag'] as int?;
+    final configType = _discoveredDevice!['configType']?.toString() ?? '';
     debugPrint("BLE Device UUID -> $uuid");
     debugPrint("BLE ProductId -> $productId");
+    debugPrint("BLE configType -> $configType");
     debugPrint("BLE Device Info -> $_discoveredDevice");
     if (uuid.isEmpty || productId.isEmpty) {
       _showSnackBar('Invalid device info (missing uuid or productId)');
+      return;
+    }
+
+    // If the device reports configType as wifi, it needs WiFi credentials
+    // to complete pairing. Auto-switch to combo mode.
+    if (configType.contains('wifi')) {
+      debugPrint("Device requires WiFi config — switching to combo mode");
+      if (_ssidController.text.isEmpty) {
+        setState(() {
+          _mode = 'combo';
+          _status = 'This device requires WiFi. Switched to Combo mode — '
+              'enter your WiFi credentials and tap "Start Combo Pairing".';
+        });
+        _showSnackBar('This device needs WiFi credentials. Switched to Combo mode.');
+        return;
+      }
+      // WiFi credentials already filled, proceed with combo pairing directly
+      _pairCombo();
       return;
     }
 
@@ -142,9 +162,6 @@ class _DevicePairingScreenState extends State<DevicePairingScreen> {
     });
 
     try {
-      // Fetch a fresh cloud token before BLE pairing.
-      // The SDK caches this internally — without it, the cached token
-      // may be expired, causing error 105: EXPIRE.
       debugPrint("Fetching fresh token for BLE pairing...");
       final token = await TuyaFlutterHaSdk.getToken(homeId: widget.homeId);
       debugPrint("Token received -> $token");
@@ -416,6 +433,21 @@ class _DevicePairingScreenState extends State<DevicePairingScreen> {
                               'BLE Type: ${_discoveredDevice!['bleType']}',
                               style: TextStyle(
                                   color: cs.onPrimaryContainer, fontSize: 12)),
+                        if (_discoveredDevice!['configType']
+                                ?.toString()
+                                .contains('wifi') ==
+                            true)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 8),
+                            child: Text(
+                              'This device requires WiFi — use Combo mode',
+                              style: TextStyle(
+                                color: cs.error,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 12,
+                              ),
+                            ),
+                          ),
                       ],
                     ),
                   ),
