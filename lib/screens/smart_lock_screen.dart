@@ -23,6 +23,9 @@ class SmartLockScreen extends StatefulWidget {
 }
 
 class _SmartLockScreenState extends State<SmartLockScreen> {
+  static const _lockExtras =
+      MethodChannel('xrda3_smart_lock/lock_extras');
+
   Map<String, dynamic>? _deviceInfo;
   Map<String, dynamic> _dps = {};
   bool _loading = true;
@@ -331,12 +334,40 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
   }
 
   Future<void> _getDynamicPassword() async {
+    setState(() => _actionLoading = true);
+    String? password;
+    String source = 'BLE';
+
+    // Try BLE dynamic password first (works offline, generated locally)
     try {
-      final password = await TuyaFlutterHaSdk.dynamicWifiLockPassword(
-        devId: widget.devId,
+      debugPrint("Trying BLE dynamic password...");
+      password = await _lockExtras.invokeMethod<String>(
+        'getDynamicPasswordBLE',
+        {'devId': widget.devId},
       );
-      debugPrint("Dynamic password generated: $password");
-      if (!mounted) return;
+      debugPrint("BLE dynamic password: $password");
+    } catch (e) {
+      debugPrint("BLE dynamic password failed: $e");
+    }
+
+    // Fallback to WiFi dynamic password if BLE failed
+    if (password == null || password.isEmpty) {
+      try {
+        debugPrint("Trying WiFi dynamic password...");
+        source = 'WiFi';
+        final wifiPwd = await TuyaFlutterHaSdk.dynamicWifiLockPassword(
+          devId: widget.devId,
+        );
+        password = wifiPwd?.toString();
+        debugPrint("WiFi dynamic password: $password");
+      } catch (e) {
+        debugPrint("WiFi dynamic password failed: $e");
+      }
+    }
+
+    if (mounted) setState(() => _actionLoading = false);
+
+    if (password != null && password.isNotEmpty && mounted) {
       showDialog(
         context: context,
         builder: (ctx) => AlertDialog(
@@ -344,7 +375,8 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
           content: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Text('Enter this password on the lock keypad:'),
+              Text('Enter this password on the lock keypad.\n'
+                  'Valid for 5 minutes. (via $source)'),
               const SizedBox(height: 16),
               Container(
                 padding: const EdgeInsets.all(16),
@@ -353,11 +385,12 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
                   borderRadius: BorderRadius.circular(12),
                 ),
                 child: SelectableText(
-                  password.toString(),
+                  password,
                   style: TextStyle(
                     fontSize: 32,
                     fontWeight: FontWeight.bold,
-                    color: Theme.of(context).colorScheme.onPrimaryContainer,
+                    color:
+                        Theme.of(context).colorScheme.onPrimaryContainer,
                     letterSpacing: 4,
                   ),
                 ),
@@ -372,16 +405,11 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
           ],
         ),
       );
-    } catch (e) {
-      debugPrint("Dynamic password error: $e");
-      final errStr = e.toString();
-      if (errStr.contains('OPERATE_NOT_SUPPORTED')) {
-        _showSnackBar(
-          'Dynamic password is not supported by this lock model.',
-        );
-      } else {
-        _showSnackBar('Failed to get password: $e');
-      }
+    } else if (mounted) {
+      _showSnackBar(
+        'Could not generate dynamic password. '
+        'Make sure Bluetooth is on and you are near the lock.',
+      );
     }
   }
 
