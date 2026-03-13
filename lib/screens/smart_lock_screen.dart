@@ -29,6 +29,7 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
   bool _actionLoading = false;
   bool _isMatter = false;
   Timer? _refreshTimer;
+  StreamSubscription? _dpEventSub;
 
   @override
   void initState() {
@@ -36,25 +37,32 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
 
     print("SmartLockScreen opened for device: ${widget.devId}");
 
-    const EventChannel deviceEventChannel =
-    EventChannel('tuya_flutter_ha_sdk/deviceEvents');
-    deviceEventChannel.receiveBroadcastStream().listen((event) {
-
-      print("Device Event: $event");
+    // The native plugin sends DP updates through the pairingEvents channel
+    // (there is no separate deviceEvents channel in the native layer).
+    // DP updates arrive as strings: "onDpUpdate:{...}"
+    // Pairing events arrive as Maps — we filter for DP strings only here.
+    const EventChannel dpEventChannel =
+        EventChannel('tuya_flutter_ha_sdk/pairingEvents');
+    _dpEventSub = dpEventChannel.receiveBroadcastStream().listen((event) {
+      debugPrint("PairingChannel Event: $event");
 
       if (event is String && event.startsWith("onDpUpdate:")) {
-
         final jsonStr = event.replaceFirst("onDpUpdate:", "");
-
-        final Map<String, dynamic> dpData =
-        Map<String, dynamic>.from(jsonDecode(jsonStr));
-
-        setState(() {
-          _dps.addAll(dpData); // merge updates
-        });
-
-        print("DPS Updated: $_dps");
+        try {
+          final Map<String, dynamic> dpData =
+              Map<String, dynamic>.from(jsonDecode(jsonStr));
+          if (mounted) {
+            setState(() {
+              _dps.addAll(dpData);
+            });
+          }
+          debugPrint("DPS Updated: $_dps");
+        } catch (e) {
+          debugPrint("Failed to parse DP update: $e");
+        }
       }
+    }, onError: (error) {
+      debugPrint("DP event stream error: $error");
     });
     _initAndLoad();
   }
@@ -91,13 +99,37 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
     try {
       debugPrint("Fetching device info...");
 
+      // queryDeviceInfo only calls getDpList and returns null on success,
+      // so we use getHomeDevices to get full device metadata (online status,
+      // category, DPs, etc.) from the SDK's cached DeviceBean.
+      if (widget.homeId != null) {
+        final devices =
+            await TuyaFlutterHaSdk.getHomeDevices(homeId: widget.homeId!);
+        if (devices != null) {
+          final devList = List<Map<String, dynamic>>.from(
+            devices.map((d) => Map<String, dynamic>.from(d as Map)),
+          );
+          final match = devList.where((d) => d['devId'] == widget.devId);
+          if (match.isNotEmpty && mounted) {
+            final info = match.first;
+            debugPrint("Device info from home: $info");
+            setState(() {
+              _deviceInfo = info;
+              if (info['dps'] != null) {
+                _dps = Map<String, dynamic>.from(info['dps'] as Map);
+              }
+            });
+            return;
+          }
+        }
+      }
+
+      // Fallback: try queryDeviceInfo (may return null on success)
       final info = await TuyaFlutterHaSdk.queryDeviceInfo(
         devId: widget.devId,
         dps: [],
       );
-
-      debugPrint("Device info received: $info");
-
+      debugPrint("Device info (queryDeviceInfo): $info");
       if (info != null && mounted) {
         setState(() {
           _deviceInfo = info;
@@ -157,10 +189,19 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
       await Future.delayed(const Duration(seconds: 2));
       await _refreshStatus();
     } catch (e) {
-      debugPrint("BLE unlock failed: $e");
+      final errStr = e.toString();
+      debugPrint("BLE unlock failed: $errStr");
 
-      // If first attempt failed, retry once after re-initializing device
-      if (e.toString().contains('time out') || e.toString().contains('10204')) {
+      if (errStr.contains('Empty key') ||
+          errStr.contains('SecretKeySpec')) {
+        // Security AAR can't derive BLE encryption keys — SHA256 mismatch
+        _showSnackBar(
+          'BLE security error. Verify your keystore SHA256 is '
+          'registered on the Tuya platform.',
+        );
+      } else if (errStr.contains('time out') ||
+          errStr.contains('10204') ||
+          errStr.contains('User ID') && errStr.contains('0')) {
         debugPrint("BLE unlock timed out, retrying after re-init...");
         _showSnackBar('Retrying BLE unlock...');
         try {
@@ -174,7 +215,8 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
           debugPrint("BLE unlock retry failed: $retryError");
           _showSnackBar(
             'BLE unlock failed. Make sure you are near the lock '
-            'and Bluetooth is enabled.',
+            'and Bluetooth is enabled. If the issue persists, '
+            'verify SHA256 is registered on Tuya platform.',
           );
         }
       } else {
@@ -312,6 +354,7 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
   @override
   void dispose() {
     _refreshTimer?.cancel();
+    _dpEventSub?.cancel();
     super.dispose();
   }
 
