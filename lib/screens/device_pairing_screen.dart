@@ -214,6 +214,10 @@ class _DevicePairingScreenState extends State<DevicePairingScreen> {
       _showSnackBar('Please enter WiFi SSID');
       return;
     }
+    if (_wifiPwdController.text.isEmpty) {
+      _showSnackBar('Please enter WiFi password');
+      return;
+    }
 
     final uuid = _discoveredDevice!['uuid']?.toString() ?? '';
     final productId = _discoveredDevice!['productId']?.toString() ?? '';
