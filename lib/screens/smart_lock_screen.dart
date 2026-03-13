@@ -142,29 +142,48 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
   }
 
   /// Determine if the lock is currently locked based on DPS values.
-  /// Common Tuya lock DPS:
-  ///   dp 1 = switch / motor state (bool)
-  ///   dp 47 = lock state (bool: true=locked)
-  ///   dp 8 = open from inside
-
+  /// Smart lock MINI uses DP 18 for lock state: "closed" = locked, "opened" = unlocked.
+  /// DP 1 is the unlock method record (enum, read-only), NOT a switch.
   bool? get _isLocked {
-    debugPrint("Checking lock state from DPS: $_dps");
-
-    // First check DP47 (some locks use this)
-    if (_dps.containsKey('47')) {
-      debugPrint("Using DP47 for lock state: ${_dps['47']}");
-      return _dps['47'] == true;
+    // DP 18 is the lock state for this device
+    if (_dps.containsKey('18')) {
+      final state = _dps['18']?.toString().toLowerCase();
+      debugPrint("Lock state (DP18): $state");
+      return state == 'closed';
     }
 
-    // Most Tuya locks use DP1
-    if (_dps.containsKey('1')) {
-      debugPrint("Using DP1 for lock state: ${_dps['1']}");
-      return _dps['1'] == 0; // 0 = locked, 1 = unlocked
+    // Fallback: DP 47 (some other lock models)
+    if (_dps.containsKey('47')) {
+      return _dps['47'] == true;
     }
 
     debugPrint("Lock state unknown");
     return null;
   }
+
+  /// Last unlock method from DP 1 (read-only enum)
+  String get _lastUnlockMethod {
+    final val = _dps['1'];
+    if (val == null) return 'Unknown';
+    switch (val.toString()) {
+      case '1': return 'Fingerprint';
+      case '2': return 'Password';
+      case '3': return 'Card';
+      case '4': return 'Key';
+      case '5': return 'Remote';
+      case '6': return 'Face';
+      default: return 'Method $val';
+    }
+  }
+
+  /// Volume setting from DP 11
+  String get _volumeLevel => _dps['11']?.toString() ?? 'Unknown';
+
+  /// Child lock from DP 17
+  bool get _childLock => _dps['17'] == true;
+
+  /// Auto lock from DP 19
+  bool get _autoLock => _dps['19'] == true;
 
   bool get _isOnline => _deviceInfo?['isOnline'] == true;
 
@@ -254,54 +273,59 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
     if (mounted) setState(() => _actionLoading = false);
   }
 
-  // ── WiFi Lock Controls ──
-  Future<void> _wifiUnlock() async {
+  // ── WiFi Remote Unlock ──
+  // Smart locks use replyRemoteUnlock to RESPOND to a lock-initiated request.
+  // The lock must first send a remote unlock request (user presses button on
+  // the lock), then the app replies with allow/deny.
+  Future<void> _wifiRemoteUnlock() async {
     if (!_isOnline) {
-      _showSnackBar(
-        'Device is offline. WiFi unlock requires cloud connection.',
-      );
+      _showSnackBar('Device is offline.');
       return;
     }
 
     setState(() => _actionLoading = true);
     try {
-      debugPrint("Sending WiFi unlock command via publishDps...");
-      // Send DP command to unlock via cloud (DP 1 = switch/motor)
-      await TuyaFlutterHaSdk.controlMatter(
+      debugPrint("Sending remote unlock reply (allow)...");
+      await TuyaFlutterHaSdk.replyRequestUnlock(
         devId: widget.devId,
-        dps: {'1': true},
+        open: true,
       );
-      _showSnackBar('Unlock command sent via WiFi');
+      _showSnackBar('Remote unlock approved');
       await Future.delayed(const Duration(seconds: 2));
       await _refreshStatus();
     } catch (e) {
-      debugPrint("WiFi unlock failed: $e");
-      _showSnackBar('WiFi unlock failed: $e');
+      debugPrint("Remote unlock failed: $e");
+      final errStr = e.toString();
+      if (errStr.contains('OPERATE_NOT_SUPPORTED') ||
+          errStr.contains('no remote')) {
+        _showSnackBar(
+          'No pending unlock request from the lock. '
+          'Press the remote unlock button on the lock first.',
+        );
+      } else {
+        _showSnackBar('Remote unlock failed: $e');
+      }
     }
     if (mounted) setState(() => _actionLoading = false);
   }
 
-  Future<void> _wifiLock() async {
+  Future<void> _wifiRemoteDeny() async {
     if (!_isOnline) {
-      _showSnackBar(
-        'Device is offline. WiFi lock requires cloud connection.',
-      );
+      _showSnackBar('Device is offline.');
       return;
     }
 
     setState(() => _actionLoading = true);
     try {
-      debugPrint("Sending WiFi lock command via publishDps...");
-      await TuyaFlutterHaSdk.controlMatter(
+      debugPrint("Sending remote unlock reply (deny)...");
+      await TuyaFlutterHaSdk.replyRequestUnlock(
         devId: widget.devId,
-        dps: {'1': false},
+        open: false,
       );
-      _showSnackBar('Lock command sent via WiFi');
-      await Future.delayed(const Duration(seconds: 2));
-      await _refreshStatus();
+      _showSnackBar('Remote unlock denied');
     } catch (e) {
-      debugPrint("WiFi lock failed: $e");
-      _showSnackBar('WiFi lock failed: $e');
+      debugPrint("Remote deny failed: $e");
+      _showSnackBar('Failed: $e');
     }
     if (mounted) setState(() => _actionLoading = false);
   }
@@ -349,7 +373,15 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
         ),
       );
     } catch (e) {
-      _showSnackBar('Failed to get password: $e');
+      debugPrint("Dynamic password error: $e");
+      final errStr = e.toString();
+      if (errStr.contains('OPERATE_NOT_SUPPORTED')) {
+        _showSnackBar(
+          'Dynamic password is not supported by this lock model.',
+        );
+      } else {
+        _showSnackBar('Failed to get password: $e');
+      }
     }
   }
 
@@ -410,17 +442,11 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
               child: ListView(
                 padding: const EdgeInsets.all(16),
                 children: [
-                  // ── Tappable status card — tap to toggle lock ──
+                  // ── Tappable status card ──
                   GestureDetector(
                     onTap: (_actionLoading || !_isOnline)
                         ? null
-                        : () {
-                            if (locked == true) {
-                              _wifiUnlock();
-                            } else {
-                              _wifiLock();
-                            }
-                          },
+                        : _wifiRemoteUnlock,
                     child: Card(
                       elevation: 4,
                       shape: RoundedRectangleBorder(
@@ -503,9 +529,7 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
                             // Tap hint
                             if (_isOnline && !_actionLoading)
                               Text(
-                                locked == true
-                                    ? 'Tap to unlock'
-                                    : 'Tap to lock',
+                                'Tap to approve remote unlock',
                                 style: Theme.of(context)
                                     .textTheme
                                     .bodySmall
@@ -532,17 +556,16 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
 
                   const SizedBox(height: 16),
 
-                  // ── Lock / Unlock buttons ──
+                  // ── Remote Unlock / Deny buttons ──
                   Row(
                     children: [
                       Expanded(
                         child: FilledButton.icon(
-                          onPressed:
-                              (_actionLoading || !_isOnline)
-                                  ? null
-                                  : _wifiUnlock,
+                          onPressed: (_actionLoading || !_isOnline)
+                              ? null
+                              : _wifiRemoteUnlock,
                           icon: const Icon(Icons.lock_open),
-                          label: const Text('Unlock'),
+                          label: const Text('Approve Unlock'),
                           style: FilledButton.styleFrom(
                             minimumSize: const Size(0, 52),
                           ),
@@ -551,18 +574,26 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
                       const SizedBox(width: 12),
                       Expanded(
                         child: OutlinedButton.icon(
-                          onPressed:
-                              (_actionLoading || !_isOnline)
-                                  ? null
-                                  : _wifiLock,
-                          icon: const Icon(Icons.lock),
-                          label: const Text('Lock'),
+                          onPressed: (_actionLoading || !_isOnline)
+                              ? null
+                              : _wifiRemoteDeny,
+                          icon: const Icon(Icons.block),
+                          label: const Text('Deny'),
                           style: OutlinedButton.styleFrom(
                             minimumSize: const Size(0, 52),
                           ),
                         ),
                       ),
                     ],
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Remote unlock: press the button on the lock first, '
+                    'then tap Approve here.',
+                    textAlign: TextAlign.center,
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: cs.onSurfaceVariant,
+                        ),
                   ),
 
                   if (!_isOnline)
@@ -589,7 +620,7 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
                         children: [
                           Row(
                             children: [
-                              Icon(Icons.password,
+                              Icon(Icons.vpn_key,
                                   color: cs.primary, size: 20),
                               const SizedBox(width: 8),
                               Text('Dynamic Password',
@@ -602,7 +633,8 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
                           ),
                           const SizedBox(height: 8),
                           Text(
-                            'Generate a one-time password to unlock via the lock keypad.',
+                            'Generate a one-time password to unlock via '
+                            'the lock keypad. Valid for 5 minutes.',
                             style: Theme.of(context)
                                 .textTheme
                                 .bodySmall
@@ -615,7 +647,7 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
                               onPressed: (_actionLoading || !_isOnline)
                                   ? null
                                   : _getDynamicPassword,
-                              icon: const Icon(Icons.vpn_key),
+                              icon: const Icon(Icons.password),
                               label: const Text('Generate Password'),
                               style: FilledButton.styleFrom(
                                 minimumSize: const Size(0, 48),
@@ -627,9 +659,9 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
                     ),
                   ),
 
-                  const SizedBox(height: 24),
+                  const SizedBox(height: 16),
 
-                  // ── Lock Info ──
+                  // ── Lock Details ──
                   Card(
                     child: Padding(
                       padding: const EdgeInsets.all(16),
@@ -641,7 +673,7 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
                               Icon(Icons.info_outline,
                                   color: cs.primary, size: 20),
                               const SizedBox(width: 8),
-                              Text('Lock Info',
+                              Text('Lock Details',
                                   style: Theme.of(context)
                                       .textTheme
                                       .titleSmall
@@ -651,12 +683,14 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
                           ),
                           const Divider(height: 20),
                           _infoRow('Name', widget.deviceName),
+                          _infoRow('Lock State',
+                              locked == true ? 'Closed' : locked == false ? 'Open' : 'Unknown'),
+                          _infoRow('Last Unlock', _lastUnlockMethod),
+                          _infoRow('Volume', _volumeLevel),
+                          _infoRow('Child Lock', _childLock ? 'On' : 'Off'),
+                          _infoRow('Auto Lock', _autoLock ? 'On' : 'Off'),
                           if (mac != null && mac.isNotEmpty)
                             _infoRow('MAC', mac),
-                          if (uuid != null && uuid.isNotEmpty)
-                            _infoRow('UUID', uuid),
-                          if (productId != null && productId.isNotEmpty)
-                            _infoRow('Product', productId),
                           _infoRow(
                               'Cloud',
                               _deviceInfo?['isCloudOnline'] == true
