@@ -388,6 +388,10 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     final locked = _isLocked;
+    final iconUrl = _deviceInfo?['iconUrl']?.toString();
+    final mac = _deviceInfo?['mac']?.toString();
+    final uuid = _deviceInfo?['uuid']?.toString();
+    final productId = _deviceInfo?['productId']?.toString();
 
     return Scaffold(
       appBar: AppBar(
@@ -406,126 +410,141 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
               child: ListView(
                 padding: const EdgeInsets.all(16),
                 children: [
-                  // ── Status card ──
-                  Card(
-                    color: _isOnline
-                        ? (locked == true
-                            ? cs.primaryContainer
-                            : cs.errorContainer)
-                        : cs.surfaceContainerHighest,
-                    child: Padding(
-                      padding: const EdgeInsets.all(24),
-                      child: Column(
-                        children: [
-                          Icon(
-                            locked == true
-                                ? Icons.lock
-                                : locked == false
-                                    ? Icons.lock_open
-                                    : Icons.lock_outline,
-                            size: 80,
-                            color: _isOnline
-                                ? (locked == true
-                                    ? cs.onPrimaryContainer
-                                    : cs.onErrorContainer)
-                                : cs.onSurfaceVariant,
-                          ),
-                          const SizedBox(height: 12),
-                          Text(
-                            locked == true
-                                ? 'LOCKED'
-                                : locked == false
-                                    ? 'UNLOCKED'
-                                    : 'STATUS UNKNOWN',
-                            style: Theme.of(context)
-                                .textTheme
-                                .headlineSmall
-                                ?.copyWith(
-                                  fontWeight: FontWeight.bold,
-                                  color: _isOnline
-                                      ? (locked == true
-                                          ? cs.onPrimaryContainer
-                                          : cs.onErrorContainer)
-                                      : cs.onSurfaceVariant,
+                  // ── Tappable status card — tap to toggle lock ──
+                  GestureDetector(
+                    onTap: (_actionLoading || !_isOnline)
+                        ? null
+                        : () {
+                            if (locked == true) {
+                              _wifiUnlock();
+                            } else {
+                              _wifiLock();
+                            }
+                          },
+                    child: Card(
+                      elevation: 4,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(20),
+                      ),
+                      color: _isOnline
+                          ? (locked == true
+                              ? cs.primaryContainer
+                              : cs.errorContainer)
+                          : cs.surfaceContainerHighest,
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(
+                            vertical: 32, horizontal: 24),
+                        child: Column(
+                          children: [
+                            // Lock icon image or fallback icon
+                            if (iconUrl != null && iconUrl.isNotEmpty)
+                              ClipRRect(
+                                borderRadius: BorderRadius.circular(16),
+                                child: Image.network(
+                                  iconUrl,
+                                  width: 80,
+                                  height: 80,
+                                  fit: BoxFit.contain,
+                                  errorBuilder: (_, __, ___) => Icon(
+                                    _lockIcon(locked),
+                                    size: 80,
+                                    color: _statusColor(cs, locked),
+                                  ),
                                 ),
-                          ),
-                          const SizedBox(height: 4),
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Container(
-                                width: 10,
-                                height: 10,
-                                decoration: BoxDecoration(
-                                  color: _isOnline
-                                      ? Colors.green
-                                      : Colors.grey,
-                                  shape: BoxShape.circle,
-                                ),
+                              )
+                            else
+                              Icon(
+                                _lockIcon(locked),
+                                size: 80,
+                                color: _statusColor(cs, locked),
                               ),
-                              const SizedBox(width: 6),
-                              Text(
-                                _isOnline ? 'Online' : 'Offline',
-                                style: TextStyle(
+                            const SizedBox(height: 16),
+                            Text(
+                              locked == true
+                                  ? 'LOCKED'
+                                  : locked == false
+                                      ? 'UNLOCKED'
+                                      : 'STATUS UNKNOWN',
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .headlineSmall
+                                  ?.copyWith(
+                                    fontWeight: FontWeight.bold,
+                                    color: _statusColor(cs, locked),
+                                  ),
+                            ),
+                            const SizedBox(height: 8),
+                            // Online indicator
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Container(
+                                  width: 10,
+                                  height: 10,
+                                  decoration: BoxDecoration(
                                     color: _isOnline
                                         ? Colors.green
-                                        : Colors.grey),
+                                        : Colors.grey,
+                                    shape: BoxShape.circle,
+                                  ),
+                                ),
+                                const SizedBox(width: 6),
+                                Text(
+                                  _isOnline ? 'Online' : 'Offline',
+                                  style: TextStyle(
+                                    color: _isOnline
+                                        ? Colors.green
+                                        : Colors.grey,
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 12),
+                            // Tap hint
+                            if (_isOnline && !_actionLoading)
+                              Text(
+                                locked == true
+                                    ? 'Tap to unlock'
+                                    : 'Tap to lock',
+                                style: Theme.of(context)
+                                    .textTheme
+                                    .bodySmall
+                                    ?.copyWith(
+                                      color: _statusColor(cs, locked)
+                                          ?.withOpacity(0.7),
+                                    ),
                               ),
-                            ],
-                          ),
-                        ],
+                            if (_actionLoading)
+                              const Padding(
+                                padding: EdgeInsets.only(top: 4),
+                                child: SizedBox(
+                                  width: 24,
+                                  height: 24,
+                                  child: CircularProgressIndicator(
+                                      strokeWidth: 2),
+                                ),
+                              ),
+                          ],
+                        ),
                       ),
                     ),
                   ),
 
-                  if (_isMatter)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 8),
-                      child: Card(
-                        color: cs.tertiaryContainer,
-                        child: Padding(
-                          padding: const EdgeInsets.all(12),
-                          child: Row(
-                            children: [
-                              Icon(Icons.info_outline,
-                                  color: cs.onTertiaryContainer),
-                              const SizedBox(width: 8),
-                              Text('Matter-enabled device',
-                                  style: TextStyle(
-                                      color: cs.onTertiaryContainer)),
-                            ],
-                          ),
-                        ),
-                      ),
-                    ),
-
                   const SizedBox(height: 16),
 
-                  // ── WiFi Lock Controls ──
-                  Text('Lock Control',
-                      style: Theme.of(context).textTheme.titleMedium),
-                  const SizedBox(height: 4),
-                  if (!_isOnline)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 8),
-                      child: Text(
-                        'Device is offline — controls unavailable',
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                              color: cs.error,
-                            ),
-                      ),
-                    ),
-                  const SizedBox(height: 4),
+                  // ── Lock / Unlock buttons ──
                   Row(
                     children: [
                       Expanded(
                         child: FilledButton.icon(
                           onPressed:
-                              (_actionLoading || !_isOnline) ? null : _wifiUnlock,
+                              (_actionLoading || !_isOnline)
+                                  ? null
+                                  : _wifiUnlock,
                           icon: const Icon(Icons.lock_open),
                           label: const Text('Unlock'),
                           style: FilledButton.styleFrom(
-                            minimumSize: const Size(0, 48),
+                            minimumSize: const Size(0, 52),
                           ),
                         ),
                       ),
@@ -533,34 +552,61 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
                       Expanded(
                         child: OutlinedButton.icon(
                           onPressed:
-                              (_actionLoading || !_isOnline) ? null : _wifiLock,
+                              (_actionLoading || !_isOnline)
+                                  ? null
+                                  : _wifiLock,
                           icon: const Icon(Icons.lock),
                           label: const Text('Lock'),
                           style: OutlinedButton.styleFrom(
-                            minimumSize: const Size(0, 48),
+                            minimumSize: const Size(0, 52),
                           ),
                         ),
                       ),
                     ],
                   ),
 
+                  if (!_isOnline)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: Text(
+                        'Device is offline — controls unavailable',
+                        textAlign: TextAlign.center,
+                        style: Theme.of(context)
+                            .textTheme
+                            .bodySmall
+                            ?.copyWith(color: cs.error),
+                      ),
+                    ),
+
                   const SizedBox(height: 24),
 
                   // ── Dynamic Password ──
-                  Text('Dynamic Password',
-                      style: Theme.of(context).textTheme.titleMedium),
-                  const SizedBox(height: 8),
                   Card(
                     child: Padding(
                       padding: const EdgeInsets.all(16),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
+                          Row(
+                            children: [
+                              Icon(Icons.password,
+                                  color: cs.primary, size: 20),
+                              const SizedBox(width: 8),
+                              Text('Dynamic Password',
+                                  style: Theme.of(context)
+                                      .textTheme
+                                      .titleSmall
+                                      ?.copyWith(
+                                          fontWeight: FontWeight.w600)),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
                           Text(
                             'Generate a one-time password to unlock via the lock keypad.',
-                            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                                  color: cs.onSurfaceVariant,
-                                ),
+                            style: Theme.of(context)
+                                .textTheme
+                                .bodySmall
+                                ?.copyWith(color: cs.onSurfaceVariant),
                           ),
                           const SizedBox(height: 12),
                           SizedBox(
@@ -569,7 +615,7 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
                               onPressed: (_actionLoading || !_isOnline)
                                   ? null
                                   : _getDynamicPassword,
-                              icon: const Icon(Icons.password),
+                              icon: const Icon(Icons.vpn_key),
                               label: const Text('Generate Password'),
                               style: FilledButton.styleFrom(
                                 minimumSize: const Size(0, 48),
@@ -581,48 +627,41 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
                     ),
                   ),
 
-                  // ── DPS raw data ──
-                  if (_dps.isNotEmpty) ...[
-                    const SizedBox(height: 24),
-                    Text('Device Data Points',
-                        style: Theme.of(context).textTheme.titleMedium),
-                    const SizedBox(height: 8),
-                    Card(
-                      child: Padding(
-                        padding: const EdgeInsets.all(12),
-                        child: Column(
-                          children: _dps.entries.map((entry) {
-                            return _buildDpRow(entry.key, entry.value);
-                          }).toList(),
-                        ),
-                      ),
-                    ),
-                  ],
-
-                  if (_actionLoading)
-                    const Padding(
-                      padding: EdgeInsets.all(16),
-                      child: Center(child: CircularProgressIndicator()),
-                    ),
-
-                  // ── Device info ──
                   const SizedBox(height: 24),
-                  Text('Device Info',
-                      style: Theme.of(context).textTheme.titleMedium),
-                  const SizedBox(height: 8),
+
+                  // ── Lock Info ──
                   Card(
                     child: Padding(
-                      padding: const EdgeInsets.all(12),
+                      padding: const EdgeInsets.all(16),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          _infoRow('Device ID', widget.devId),
-                          _infoRow('Category',
-                              _deviceInfo?['category']?.toString() ?? 'N/A'),
-                          _infoRow('Product ID',
-                              _deviceInfo?['productId']?.toString() ?? 'N/A'),
+                          Row(
+                            children: [
+                              Icon(Icons.info_outline,
+                                  color: cs.primary, size: 20),
+                              const SizedBox(width: 8),
+                              Text('Lock Info',
+                                  style: Theme.of(context)
+                                      .textTheme
+                                      .titleSmall
+                                      ?.copyWith(
+                                          fontWeight: FontWeight.w600)),
+                            ],
+                          ),
+                          const Divider(height: 20),
+                          _infoRow('Name', widget.deviceName),
+                          if (mac != null && mac.isNotEmpty)
+                            _infoRow('MAC', mac),
+                          if (uuid != null && uuid.isNotEmpty)
+                            _infoRow('UUID', uuid),
+                          if (productId != null && productId.isNotEmpty)
+                            _infoRow('Product', productId),
                           _infoRow(
-                              'Online', _isOnline ? 'Yes' : 'No'),
+                              'Cloud',
+                              _deviceInfo?['isCloudOnline'] == true
+                                  ? 'Connected'
+                                  : 'Disconnected'),
                         ],
                       ),
                     ),
@@ -633,39 +672,33 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
     );
   }
 
-  Widget _buildDpRow(String dpId, dynamic value) {
-    if (value is bool) {
-      return SwitchListTile(
-        title: Text('DP $dpId'),
-        subtitle: Text(value ? 'ON' : 'OFF'),
-        value: value,
-        onChanged: _actionLoading
-            ? null
-            : (newVal) => _sendDps(dpId, newVal),
-      );
-    }
-    return ListTile(
-      title: Text('DP $dpId'),
-      trailing: Text('$value', style: const TextStyle(fontSize: 16)),
-      dense: true,
-    );
+  IconData _lockIcon(bool? locked) {
+    if (locked == true) return Icons.lock;
+    if (locked == false) return Icons.lock_open;
+    return Icons.lock_outline;
+  }
+
+  Color? _statusColor(ColorScheme cs, bool? locked) {
+    if (!_isOnline) return cs.onSurfaceVariant;
+    if (locked == true) return cs.onPrimaryContainer;
+    return cs.onErrorContainer;
   }
 
   Widget _infoRow(String label, String value) {
-    debugPrint("$label : $value");
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 3),
+      padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(
         children: [
           SizedBox(
-            width: 90,
+            width: 70,
             child: Text(label,
-                style: const TextStyle(fontWeight: FontWeight.w500)),
+                style: TextStyle(
+                    fontWeight: FontWeight.w500,
+                    color: Theme.of(context).colorScheme.onSurfaceVariant)),
           ),
           Expanded(
             child: Text(value,
-                style: TextStyle(
-                    color: Theme.of(context).colorScheme.onSurfaceVariant)),
+                style: const TextStyle(fontWeight: FontWeight.w400)),
           ),
         ],
       ),
