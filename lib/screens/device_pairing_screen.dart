@@ -138,10 +138,19 @@ class _DevicePairingScreenState extends State<DevicePairingScreen> {
 
     setState(() {
       _pairing = true;
-      _status = 'Pairing BLE device…';
+      _status = 'Getting pairing token…';
     });
-    debugPrint("Calling TuyaFlutterHaSdk.pairBleDevice()");
+
     try {
+      // Fetch a fresh cloud token before BLE pairing.
+      // The SDK caches this internally — without it, the cached token
+      // may be expired, causing error 105: EXPIRE.
+      debugPrint("Fetching fresh token for BLE pairing...");
+      final token = await TuyaFlutterHaSdk.getToken(homeId: widget.homeId);
+      debugPrint("Token received -> $token");
+
+      setState(() => _status = 'Pairing BLE device…');
+      debugPrint("Calling TuyaFlutterHaSdk.pairBleDevice()");
       final result = await TuyaFlutterHaSdk.pairBleDevice(
         uuid: uuid,
         productId: productId,
