@@ -32,6 +32,9 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
   bool _actionLoading = false;
   bool _isMatter = false;
   Timer? _refreshTimer;
+
+  // Recent lock events (alarms, unlock events) from DP updates
+  final List<_LockEvent> _recentEvents = [];
   StreamSubscription? _dpEventSub;
 
   @override
@@ -57,6 +60,7 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
           if (mounted) {
             setState(() {
               _dps.addAll(dpData);
+              _processLockEvents(dpData);
             });
           }
           debugPrint("DPS Updated: $_dps");
@@ -189,6 +193,85 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
   bool get _autoLock => _dps['19'] == true;
 
   bool get _isOnline => _deviceInfo?['isOnline'] == true;
+
+  /// Process incoming DP updates for lock events (alarms, unlocks, state changes)
+  void _processLockEvents(Map<String, dynamic> dpData) {
+    final now = DateTime.now();
+
+    // DP 8: alarm_lock — fingerprint/password/card failures, pry, low battery
+    if (dpData.containsKey('8')) {
+      final alarm = dpData['8'].toString();
+      _recentEvents.insert(0, _LockEvent(
+        time: now,
+        type: _LockEventType.alarm,
+        title: _alarmTitle(alarm),
+        detail: alarm,
+      ));
+    }
+
+    // DP 18: lock state changed
+    if (dpData.containsKey('18')) {
+      final state = dpData['18'].toString();
+      _recentEvents.insert(0, _LockEvent(
+        time: now,
+        type: state == 'closed'
+            ? _LockEventType.locked
+            : _LockEventType.unlocked,
+        title: state == 'closed' ? 'Door Locked' : 'Door Unlocked',
+        detail: state,
+      ));
+    }
+
+    // DP 1: unlock method (reported on successful unlock)
+    if (dpData.containsKey('1') && !dpData.containsKey('18')) {
+      final method = dpData['1'].toString();
+      _recentEvents.insert(0, _LockEvent(
+        time: now,
+        type: _LockEventType.unlocked,
+        title: 'Unlocked via ${_unlockMethodName(method)}',
+        detail: method,
+      ));
+    }
+
+    // Keep only latest 20 events
+    if (_recentEvents.length > 20) {
+      _recentEvents.removeRange(20, _recentEvents.length);
+    }
+  }
+
+  String _alarmTitle(String alarm) {
+    switch (alarm) {
+      case 'wrong_finger': return 'Wrong Fingerprint';
+      case 'wrong_password': return 'Wrong Password';
+      case 'wrong_card': return 'Wrong Card';
+      case 'wrong_face': return 'Wrong Face';
+      case 'tongue_bad': return 'Bolt Stuck';
+      case 'too_hot': return 'High Temperature';
+      case 'unclosed_time': return 'Door Unclosed Timeout';
+      case 'tongue_not_out': return 'Bolt Not Ejected';
+      case 'pry': return 'Anti-Pry Alert';
+      case 'key_in': return 'Key Inserted';
+      case 'low_battery': return 'Low Battery';
+      case 'power_off': return 'Battery Exhausted';
+      case 'shock': return 'Vibration Detected';
+      case 'defense': return 'Defense Mode';
+      case 'stay_alarm': return 'Stay Alarm';
+      case 'doorbell': return 'Doorbell';
+      default: return 'Alert: $alarm';
+    }
+  }
+
+  String _unlockMethodName(String val) {
+    switch (val) {
+      case '1': return 'Fingerprint';
+      case '2': return 'Password';
+      case '3': return 'Card';
+      case '4': return 'Key';
+      case '5': return 'Remote';
+      case '6': return 'Face';
+      default: return 'Method $val';
+    }
+  }
 
   // ── BLE Lock Controls ──
   Future<void> _unlockBLE() async {
@@ -689,6 +772,73 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
 
                   const SizedBox(height: 16),
 
+                  // ── Recent Events ──
+                  Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Icon(Icons.history,
+                                  color: cs.primary, size: 20),
+                              const SizedBox(width: 8),
+                              Text('Recent Events',
+                                  style: Theme.of(context)
+                                      .textTheme
+                                      .titleSmall
+                                      ?.copyWith(
+                                          fontWeight: FontWeight.w600)),
+                              const Spacer(),
+                              if (_recentEvents.isNotEmpty)
+                                TextButton(
+                                  onPressed: () => setState(
+                                      () => _recentEvents.clear()),
+                                  child: const Text('Clear'),
+                                ),
+                            ],
+                          ),
+                          const Divider(height: 16),
+                          // Current alarm status from DPS
+                          if (_dps.containsKey('8'))
+                            _buildEventTile(
+                              _LockEvent(
+                                time: DateTime.now(),
+                                type: _LockEventType.alarm,
+                                title: _alarmTitle(
+                                    _dps['8'].toString()),
+                                detail: _dps['8'].toString(),
+                              ),
+                              isCurrent: true,
+                            ),
+                          if (_recentEvents.isEmpty &&
+                              !_dps.containsKey('8'))
+                            Padding(
+                              padding:
+                                  const EdgeInsets.symmetric(vertical: 12),
+                              child: Center(
+                                child: Text(
+                                  'No events yet. Events appear here in '
+                                  'real-time as the lock reports them.',
+                                  textAlign: TextAlign.center,
+                                  style: Theme.of(context)
+                                      .textTheme
+                                      .bodySmall
+                                      ?.copyWith(
+                                          color: cs.onSurfaceVariant),
+                                ),
+                              ),
+                            ),
+                          ...(_recentEvents.take(10).map(
+                              (e) => _buildEventTile(e))),
+                        ],
+                      ),
+                    ),
+                  ),
+
+                  const SizedBox(height: 16),
+
                   // ── Lock Details ──
                   Card(
                     child: Padding(
@@ -766,4 +916,71 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
       ),
     );
   }
+
+  Widget _buildEventTile(_LockEvent event, {bool isCurrent = false}) {
+    final cs = Theme.of(context).colorScheme;
+    IconData icon;
+    Color iconColor;
+
+    switch (event.type) {
+      case _LockEventType.alarm:
+        icon = Icons.warning_amber_rounded;
+        iconColor = cs.error;
+        break;
+      case _LockEventType.unlocked:
+        icon = Icons.lock_open;
+        iconColor = Colors.orange;
+        break;
+      case _LockEventType.locked:
+        icon = Icons.lock;
+        iconColor = Colors.green;
+        break;
+    }
+
+    final timeStr = isCurrent
+        ? 'Current'
+        : '${event.time.hour.toString().padLeft(2, '0')}:'
+            '${event.time.minute.toString().padLeft(2, '0')}:'
+            '${event.time.second.toString().padLeft(2, '0')}';
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        children: [
+          Icon(icon, size: 20, color: iconColor),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(event.title,
+                style: TextStyle(
+                  fontWeight: isCurrent ? FontWeight.w600 : FontWeight.w400,
+                  color: event.type == _LockEventType.alarm
+                      ? cs.error
+                      : null,
+                )),
+          ),
+          Text(timeStr,
+              style: Theme.of(context)
+                  .textTheme
+                  .bodySmall
+                  ?.copyWith(color: cs.onSurfaceVariant)),
+        ],
+      ),
+    );
+  }
+}
+
+enum _LockEventType { alarm, unlocked, locked }
+
+class _LockEvent {
+  final DateTime time;
+  final _LockEventType type;
+  final String title;
+  final String detail;
+
+  _LockEvent({
+    required this.time,
+    required this.type,
+    required this.title,
+    required this.detail,
+  });
 }
