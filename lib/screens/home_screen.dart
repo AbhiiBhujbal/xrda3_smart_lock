@@ -345,6 +345,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                     ? SmartLockScreen(
                                   devId: devId,
                                   deviceName: name,
+                                  homeId: _homeId,
                                 )
                                     : DeviceControlScreen(
                                   devId: devId,

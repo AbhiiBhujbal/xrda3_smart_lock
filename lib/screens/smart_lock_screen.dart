@@ -9,11 +9,13 @@ import 'package:tuya_flutter_ha_sdk/tuya_flutter_ha_sdk.dart';
 class SmartLockScreen extends StatefulWidget {
   final String devId;
   final String deviceName;
+  final int? homeId;
 
   const SmartLockScreen({
     super.key,
     required this.devId,
     required this.deviceName,
+    this.homeId,
   });
 
   @override
@@ -62,21 +64,25 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
     setState(() => _loading = true);
 
     try {
-      print("Step 1 → initDevice");
+      // Step 1: Pre-load home data so the SDK caches member info
+      // This is critical for BLE unlock — without it, getCurrentMemberDetail
+      // returns lockUserId=0 and BLE auth fails with timeout.
+      if (widget.homeId != null) {
+        debugPrint("Step 0 → loading home devices for homeId: ${widget.homeId}");
+        await TuyaFlutterHaSdk.getHomeDevices(homeId: widget.homeId!);
+        debugPrint("Step 0 → home devices loaded (member cache populated)");
+      }
 
+      debugPrint("Step 1 → initDevice");
       await TuyaFlutterHaSdk.initDevice(devId: widget.devId);
+      debugPrint("Step 2 → device initialized");
 
-      print("Step 2 → device initialized");
-
-      // 🔴 ADD THIS LINE
       await _refreshStatus();
-
     } catch (e) {
-      print("initDevice error: $e");
+      debugPrint("initDevice error: $e");
     }
 
     if (!mounted) return;
-
     setState(() => _loading = false);
   }
 
@@ -137,18 +143,43 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
     try {
       debugPrint("Sending BLE unlock command...");
 
-      await TuyaFlutterHaSdk.unlockBLELock(
-        devId: widget.devId,
-      );
+      // Re-load home data before BLE unlock to ensure member cache is fresh.
+      // The Tuya SDK's getCurrentMemberDetail needs this to return a valid
+      // lockUserId (otherwise it returns 0 and bleUnlock times out).
+      if (widget.homeId != null) {
+        debugPrint("Pre-loading home data for BLE auth...");
+        await TuyaFlutterHaSdk.getHomeDevices(homeId: widget.homeId!);
+      }
 
-      _showSnackBar('🔓 Lock opened via BLE');
+      await TuyaFlutterHaSdk.unlockBLELock(devId: widget.devId);
 
+      _showSnackBar('Lock opened via BLE');
       await Future.delayed(const Duration(seconds: 2));
       await _refreshStatus();
-
     } catch (e) {
       debugPrint("BLE unlock failed: $e");
-      _showSnackBar('Unlock failed: $e');
+
+      // If first attempt failed, retry once after re-initializing device
+      if (e.toString().contains('time out') || e.toString().contains('10204')) {
+        debugPrint("BLE unlock timed out, retrying after re-init...");
+        _showSnackBar('Retrying BLE unlock...');
+        try {
+          await TuyaFlutterHaSdk.initDevice(devId: widget.devId);
+          await Future.delayed(const Duration(seconds: 1));
+          await TuyaFlutterHaSdk.unlockBLELock(devId: widget.devId);
+          _showSnackBar('Lock opened via BLE');
+          await Future.delayed(const Duration(seconds: 2));
+          await _refreshStatus();
+        } catch (retryError) {
+          debugPrint("BLE unlock retry failed: $retryError");
+          _showSnackBar(
+            'BLE unlock failed. Make sure you are near the lock '
+            'and Bluetooth is enabled.',
+          );
+        }
+      } else {
+        _showSnackBar('BLE unlock failed: $e');
+      }
     }
 
     if (mounted) setState(() => _actionLoading = false);
@@ -158,28 +189,51 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
     setState(() => _actionLoading = true);
     try {
       debugPrint("Sending BLE lock command...");
+
+      if (widget.homeId != null) {
+        await TuyaFlutterHaSdk.getHomeDevices(homeId: widget.homeId!);
+      }
+
       await TuyaFlutterHaSdk.lockBLELock(devId: widget.devId);
-      _showSnackBar('🔒 Lock closed via BLE');
+      _showSnackBar('Lock closed via BLE');
       await Future.delayed(const Duration(seconds: 2));
       await _refreshStatus();
     } catch (e) {
-      _showSnackBar('Lock failed: $e');
+      debugPrint("BLE lock failed: $e");
+      if (e.toString().contains('time out') || e.toString().contains('10204')) {
+        _showSnackBar(
+          'BLE lock failed. Make sure you are near the lock '
+          'and Bluetooth is enabled.',
+        );
+      } else {
+        _showSnackBar('Lock failed: $e');
+      }
     }
     if (mounted) setState(() => _actionLoading = false);
   }
 
   // ── WiFi Lock Controls ──
   Future<void> _wifiUnlock() async {
+    if (!_isOnline) {
+      _showSnackBar(
+        'Device is offline. WiFi unlock requires cloud connection.',
+      );
+      return;
+    }
+
     setState(() => _actionLoading = true);
     try {
       debugPrint("Sending WiFi unlock command...");
       await TuyaFlutterHaSdk.replyRequestUnlock(
           devId: widget.devId, open: true);
-      _showSnackBar('🔓 Lock opened via WiFi');
+      _showSnackBar('Lock opened via WiFi');
       await Future.delayed(const Duration(seconds: 2));
       await _refreshStatus();
     } catch (e) {
-      _showSnackBar('WiFi unlock failed: $e');
+      debugPrint("WiFi unlock failed: $e");
+      _showSnackBar(
+        'WiFi unlock failed. Ensure the lock is connected to WiFi.',
+      );
     }
     if (mounted) setState(() => _actionLoading = false);
   }
@@ -415,9 +469,21 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
                   // ── WiFi Controls ──
                   Text('WiFi Lock Control',
                       style: Theme.of(context).textTheme.titleMedium),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: 4),
+                  if (!_isOnline)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: Text(
+                        'Device is offline — WiFi controls unavailable',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              color: cs.error,
+                            ),
+                      ),
+                    ),
+                  const SizedBox(height: 4),
                   FilledButton.icon(
-                    onPressed: _actionLoading ? null : _wifiUnlock,
+                    onPressed:
+                        (_actionLoading || !_isOnline) ? null : _wifiUnlock,
                     icon: const Icon(Icons.lock_open),
                     label: const Text('Remote Unlock (WiFi)'),
                     style: FilledButton.styleFrom(
@@ -426,7 +492,9 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
                   ),
                   const SizedBox(height: 12),
                   OutlinedButton.icon(
-                    onPressed: _getDynamicPassword,
+                    onPressed: (_actionLoading || !_isOnline)
+                        ? null
+                        : _getDynamicPassword,
                     icon: const Icon(Icons.password),
                     label: const Text('Get Dynamic Password'),
                     style: OutlinedButton.styleFrom(
