@@ -8,7 +8,10 @@ import io.flutter.plugin.common.MethodChannel
 import com.thingclips.smart.optimus.sdk.ThingOptimusSdk
 import com.thingclips.smart.optimus.lock.api.IThingLockManager
 import com.thingclips.smart.optimus.lock.api.IThingBleLockV2
-import com.thingclips.smart.sdk.api.IThingResultCallback
+import com.thingclips.smart.home.sdk.callback.IThingResultCallback
+import com.thingclips.smart.sdk.optimus.lock.bean.DynamicPasswordBean
+import com.thingclips.smart.optimus.lock.api.bean.OfflineTempPassword
+import com.thingclips.smart.optimus.lock.api.enums.OfflineTempPasswordType
 
 class MainActivity : FlutterActivity() {
     private val CHANNEL = "xrda3_smart_lock/lock_extras"
@@ -33,9 +36,10 @@ class MainActivity : FlutterActivity() {
                             )
                             val bleLock = lockManager.getBleLockV2(devId)
 
-                            bleLock.getDynamicPassword(
-                                object : IThingResultCallback<String> {
-                                    override fun onSuccess(password: String?) {
+                            bleLock.getLockDynamicPassword(
+                                object : IThingResultCallback<DynamicPasswordBean> {
+                                    override fun onSuccess(bean: DynamicPasswordBean?) {
+                                        val password = bean?.dynamicPassword
                                         Log.i("BLE Lock", "Dynamic password: $password")
                                         result.success(password)
                                     }
@@ -59,13 +63,11 @@ class MainActivity : FlutterActivity() {
                     "createTempPasswordBLE" -> {
                         val devId: String? = call.argument("devId")
                         val name: String? = call.argument("name")
-                        val password: String? = call.argument("password")
                         val effectiveTime: Long? = call.argument("effectiveTime")
                         val invalidTime: Long? = call.argument("invalidTime")
-                        val availTimes: Int = call.argument("availTimes") ?: 1
 
-                        if (devId == null || password == null) {
-                            result.error("INVALID_ARG", "devId and password are required", null)
+                        if (devId == null) {
+                            result.error("INVALID_ARG", "devId is required", null)
                             return@setMethodCallHandler
                         }
 
@@ -76,19 +78,19 @@ class MainActivity : FlutterActivity() {
                             )
                             val bleLock = lockManager.getBleLockV2(devId)
 
-                            bleLock.createTempPassword(
+                            val startTime = effectiveTime ?: System.currentTimeMillis()
+                            val endTime = invalidTime ?: (System.currentTimeMillis() + 24 * 60 * 60 * 1000)
+
+                            bleLock.getOfflinePassword(
+                                OfflineTempPasswordType.MULTIPLE,
+                                startTime,
+                                endTime,
                                 name ?: "Temp Password",
-                                password,
-                                null,  // scheduleBean - null for one-time
-                                "",    // phone
-                                "",    // countryCode
-                                effectiveTime ?: System.currentTimeMillis(),
-                                invalidTime ?: (System.currentTimeMillis() + 5 * 60 * 1000),
-                                availTimes,
-                                object : IThingResultCallback<String> {
-                                    override fun onSuccess(pwdResult: String?) {
-                                        Log.i("BLE Lock", "Temp password created: $pwdResult")
-                                        result.success(pwdResult)
+                                object : IThingResultCallback<OfflineTempPassword> {
+                                    override fun onSuccess(offlinePwd: OfflineTempPassword?) {
+                                        val password = offlinePwd?.pwd
+                                        Log.i("BLE Lock", "Temp password created: $password")
+                                        result.success(password)
                                     }
 
                                     override fun onError(code: String?, message: String?) {
