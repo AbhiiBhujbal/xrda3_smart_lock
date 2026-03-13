@@ -55,8 +55,10 @@ configurations.all {
 
 dependencies {
     implementation(fileTree(mapOf("dir" to "libs", "include" to listOf("*.aar"))))
-    implementation("com.thingclips.smart:thingsmart:6.2.2")
-    implementation(platform("com.thingclips.smart:thingsmart-BizBundlesBom:6.2.16"))
+    implementation("com.alibaba:fastjson:1.1.67.android")
+    implementation("com.squareup.okhttp3:okhttp-urlconnection:3.14.9")
+    implementation("com.thingclips.smart:thingsmart:6.11.1")
+    implementation(platform("com.thingclips.smart:thingsmart-BizBundlesBom:6.11.1"))
     implementation("com.thingclips.smart:thingsmart-ipcsdk:6.4.2")
     implementation("com.thingclips.smart:thingsmart-bizbundle-device_activator")
     implementation("com.thingclips.smart:thingsmart-lock-sdk:6.0.1")
