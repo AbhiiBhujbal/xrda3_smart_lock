@@ -46,6 +46,16 @@ android {
         jniLibs {
             pickFirsts += listOf("lib/*/libc++_shared.so")
         }
+        resources {
+            excludes += listOf(
+                "META-INF/INDEX.LIST",
+                "META-INF/DEPENDENCIES",
+                "META-INF/LICENSE",
+                "META-INF/LICENSE.txt",
+                "META-INF/NOTICE",
+                "META-INF/NOTICE.txt",
+            )
+        }
     }
 }
 
