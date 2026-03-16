@@ -149,14 +149,29 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
   }
 
   /// Determine if the lock is currently locked based on DPS values.
-  /// Smart lock MINI uses DP 18 for lock state: "closed" = locked, "opened" = unlocked.
+  /// Smart lock MINI uses DP 18 for lock state.
+  /// Different firmware versions may report this as:
+  ///   - String: "closed" / "opened"
+  ///   - Boolean: true (locked) / false (unlocked)
+  ///   - Enum string: "true" / "false"
   /// DP 1 is the unlock method record (enum, read-only), NOT a switch.
   bool? get _isLocked {
     // DP 18 is the lock state for this device
     if (_dps.containsKey('18')) {
-      final state = _dps['18']?.toString().toLowerCase();
-      debugPrint("Lock state (DP18): $state");
-      return state == 'closed';
+      final raw = _dps['18'];
+      final state = raw?.toString().toLowerCase().trim();
+      debugPrint("Lock state (DP18): raw=$raw, parsed=$state, type=${raw.runtimeType}");
+
+      // Boolean true/false from SDK
+      if (raw is bool) return raw;
+
+      // String values
+      if (state == 'closed' || state == 'true' || state == '1') return true;
+      if (state == 'opened' || state == 'false' || state == '0') return false;
+
+      // If we got a value but can't parse it, log and return null
+      debugPrint("DP18 has unrecognized value: $raw");
+      return null;
     }
 
     // Fallback: DP 47 (some other lock models)
@@ -164,7 +179,7 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
       return _dps['47'] == true;
     }
 
-    debugPrint("Lock state unknown");
+    debugPrint("Lock state unknown — no DP 18 or 47");
     return null;
   }
 
@@ -211,13 +226,13 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
 
     // DP 18: lock state changed
     if (dpData.containsKey('18')) {
-      final state = dpData['18'].toString();
+      final raw = dpData['18'];
+      final state = raw.toString().toLowerCase().trim();
+      final isLocked = (raw == true) || state == 'closed' || state == 'true' || state == '1';
       _recentEvents.insert(0, _LockEvent(
         time: now,
-        type: state == 'closed'
-            ? _LockEventType.locked
-            : _LockEventType.unlocked,
-        title: state == 'closed' ? 'Door Locked' : 'Door Unlocked',
+        type: isLocked ? _LockEventType.locked : _LockEventType.unlocked,
+        title: isLocked ? 'Door Locked' : 'Door Unlocked',
         detail: state,
       ));
     }
@@ -554,10 +569,17 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
                 padding: const EdgeInsets.all(16),
                 children: [
                   // ── Tappable status card ──
+                  // Tap to toggle lock: if locked → BLE unlock, if unlocked → BLE lock
                   GestureDetector(
-                    onTap: (_actionLoading || !_isOnline)
+                    onTap: _actionLoading
                         ? null
-                        : _wifiRemoteUnlock,
+                        : () {
+                            if (locked == true) {
+                              _unlockBLE();
+                            } else {
+                              _lockBLE();
+                            }
+                          },
                     child: Card(
                       elevation: 4,
                       shape: RoundedRectangleBorder(
@@ -638,9 +660,11 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
                             ),
                             const SizedBox(height: 12),
                             // Tap hint
-                            if (_isOnline && !_actionLoading)
+                            if (!_actionLoading)
                               Text(
-                                'Tap to approve remote unlock',
+                                locked == true
+                                    ? 'Tap to unlock via BLE'
+                                    : 'Tap to lock via BLE',
                                 style: Theme.of(context)
                                     .textTheme
                                     .bodySmall
@@ -667,29 +691,26 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
 
                   const SizedBox(height: 16),
 
-                  // ── Remote Unlock / Deny buttons ──
+                  // ── BLE Lock / Unlock Buttons ──
                   Row(
                     children: [
                       Expanded(
                         child: FilledButton.icon(
-                          onPressed: (_actionLoading || !_isOnline)
-                              ? null
-                              : _wifiRemoteUnlock,
+                          onPressed: _actionLoading ? null : _unlockBLE,
                           icon: const Icon(Icons.lock_open),
-                          label: const Text('Approve Unlock'),
+                          label: const Text('BLE Unlock'),
                           style: FilledButton.styleFrom(
                             minimumSize: const Size(0, 52),
+                            backgroundColor: cs.primary,
                           ),
                         ),
                       ),
                       const SizedBox(width: 12),
                       Expanded(
                         child: OutlinedButton.icon(
-                          onPressed: (_actionLoading || !_isOnline)
-                              ? null
-                              : _wifiRemoteDeny,
-                          icon: const Icon(Icons.block),
-                          label: const Text('Deny'),
+                          onPressed: _actionLoading ? null : _lockBLE,
+                          icon: const Icon(Icons.lock),
+                          label: const Text('BLE Lock'),
                           style: OutlinedButton.styleFrom(
                             minimumSize: const Size(0, 52),
                           ),
@@ -699,28 +720,89 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
                   ),
                   const SizedBox(height: 4),
                   Text(
-                    'Remote unlock: press the button on the lock first, '
-                    'then tap Approve here.',
+                    'BLE controls require Bluetooth on and proximity to lock.',
                     textAlign: TextAlign.center,
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
                           color: cs.onSurfaceVariant,
                         ),
                   ),
 
-                  if (!_isOnline)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 8),
-                      child: Text(
-                        'Device is offline — controls unavailable',
-                        textAlign: TextAlign.center,
-                        style: Theme.of(context)
-                            .textTheme
-                            .bodySmall
-                            ?.copyWith(color: cs.error),
+                  const SizedBox(height: 16),
+
+                  // ── WiFi Remote Unlock (only for lock-initiated requests) ──
+                  Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(16),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              Icon(Icons.wifi, color: cs.primary, size: 20),
+                              const SizedBox(width: 8),
+                              Text('WiFi Remote Unlock',
+                                  style: Theme.of(context)
+                                      .textTheme
+                                      .titleSmall
+                                      ?.copyWith(fontWeight: FontWeight.w600)),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            'Press the remote unlock button on the lock first, '
+                            'then tap Approve here to allow entry.',
+                            style: Theme.of(context)
+                                .textTheme
+                                .bodySmall
+                                ?.copyWith(color: cs.onSurfaceVariant),
+                          ),
+                          const SizedBox(height: 12),
+                          Row(
+                            children: [
+                              Expanded(
+                                child: FilledButton.tonalIcon(
+                                  onPressed: (_actionLoading || !_isOnline)
+                                      ? null
+                                      : _wifiRemoteUnlock,
+                                  icon: const Icon(Icons.check_circle_outline),
+                                  label: const Text('Approve'),
+                                  style: FilledButton.styleFrom(
+                                    minimumSize: const Size(0, 44),
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                              Expanded(
+                                child: OutlinedButton.icon(
+                                  onPressed: (_actionLoading || !_isOnline)
+                                      ? null
+                                      : _wifiRemoteDeny,
+                                  icon: const Icon(Icons.block),
+                                  label: const Text('Deny'),
+                                  style: OutlinedButton.styleFrom(
+                                    minimumSize: const Size(0, 44),
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          if (!_isOnline)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 8),
+                              child: Text(
+                                'Device is offline — WiFi controls unavailable',
+                                style: Theme.of(context)
+                                    .textTheme
+                                    .bodySmall
+                                    ?.copyWith(color: cs.error),
+                              ),
+                            ),
+                        ],
                       ),
                     ),
+                  ),
 
-                  const SizedBox(height: 24),
+                  const SizedBox(height: 16),
 
                   // ── Dynamic Password ──
                   Card(
