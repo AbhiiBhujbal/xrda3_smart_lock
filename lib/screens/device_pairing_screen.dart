@@ -55,9 +55,15 @@ class _DevicePairingScreenState extends State<DevicePairingScreen>
     );
 
     _listenPairingEvents();
-    _loadSavedWifi();
-    // Auto-start scanning
-    _startBleScan();
+    // Load WiFi first, then start scanning (avoids concurrent platform calls)
+    _initAndScan();
+  }
+
+  Future<void> _initAndScan() async {
+    await _loadSavedWifi();
+    // Small delay to ensure native SDK is fully ready after screen transition
+    await Future.delayed(const Duration(milliseconds: 500));
+    if (mounted) _startBleScan();
   }
 
   void _listenPairingEvents() {
@@ -133,7 +139,10 @@ class _DevicePairingScreenState extends State<DevicePairingScreen>
     });
 
     try {
-      final device = await TuyaFlutterHaSdk.discoverDeviceInfo();
+      // The native discoverDeviceInfo() never completes if no device is found,
+      // so we wrap it with a timeout to avoid hanging forever.
+      final device = await TuyaFlutterHaSdk.discoverDeviceInfo()
+          .timeout(const Duration(seconds: 60), onTimeout: () => null);
       debugPrint("BLE scan result -> $device");
 
       if (device != null && mounted) {
@@ -142,16 +151,8 @@ class _DevicePairingScreenState extends State<DevicePairingScreen>
           _phase = _PairingPhase.found;
           _status = 'Found: ${device['name'] ?? device['uuid'] ?? 'Device'}';
         });
-
-        // Check if device needs WiFi (combo) or is BLE-only
-        final configType = device['configType']?.toString() ?? '';
-        if (configType.contains('wifi')) {
-          // Needs WiFi → show credentials popup
-          _showWifiDialog();
-        } else {
-          // BLE-only device → pair directly
-          _pairBle();
-        }
+        // Don't auto-trigger pairing — let user see the device on radar
+        // and tap "Connect" when ready.
       } else if (mounted) {
         setState(() {
           _phase = _PairingPhase.error;
@@ -491,6 +492,42 @@ class _DevicePairingScreenState extends State<DevicePairingScreen>
                     },
                   ),
 
+                // Device blip on radar when found
+                if (_discoveredDevice != null &&
+                    (_phase == _PairingPhase.found ||
+                        _phase == _PairingPhase.pairing))
+                  Positioned(
+                    top: 45,
+                    right: 65,
+                    child: TweenAnimationBuilder<double>(
+                      tween: Tween(begin: 0.0, end: 1.0),
+                      duration: const Duration(milliseconds: 600),
+                      curve: Curves.elasticOut,
+                      builder: (context, value, child) => Transform.scale(
+                        scale: value,
+                        child: child,
+                      ),
+                      child: Container(
+                        width: 40,
+                        height: 40,
+                        decoration: BoxDecoration(
+                          color: Colors.green,
+                          shape: BoxShape.circle,
+                          border: Border.all(color: Colors.white, width: 2),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.green.withOpacity(0.4),
+                              blurRadius: 10,
+                              spreadRadius: 2,
+                            ),
+                          ],
+                        ),
+                        child: const Icon(Icons.lock_outline,
+                            size: 18, color: Colors.white),
+                      ),
+                    ),
+                  ),
+
                 // Center icon
                 AnimatedSwitcher(
                   duration: const Duration(milliseconds: 400),
@@ -588,8 +625,25 @@ class _DevicePairingScreenState extends State<DevicePairingScreen>
             padding: const EdgeInsets.fromLTRB(24, 0, 24, 40),
             child: Column(
               children: [
-                if (_phase == _PairingPhase.error ||
-                    _phase == _PairingPhase.found) ...[
+                if (_phase == _PairingPhase.found &&
+                    _discoveredDevice != null) ...[
+                  SizedBox(
+                    width: double.infinity,
+                    height: 52,
+                    child: FilledButton.icon(
+                      onPressed: _showWifiDialog,
+                      icon: const Icon(Icons.wifi),
+                      label: const Text('Connect & Pair'),
+                      style: FilledButton.styleFrom(
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(14),
+                        ),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                ],
+                if (_phase == _PairingPhase.error) ...[
                   SizedBox(
                     width: double.infinity,
                     height: 52,
@@ -606,23 +660,6 @@ class _DevicePairingScreenState extends State<DevicePairingScreen>
                   ),
                   const SizedBox(height: 12),
                 ],
-                if (_phase == _PairingPhase.found &&
-                    _discoveredDevice != null &&
-                    (_discoveredDevice!['configType']?.toString().contains('wifi') ?? false))
-                  SizedBox(
-                    width: double.infinity,
-                    height: 52,
-                    child: OutlinedButton.icon(
-                      onPressed: _showWifiDialog,
-                      icon: const Icon(Icons.wifi),
-                      label: const Text('Enter WiFi & Pair'),
-                      style: OutlinedButton.styleFrom(
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(14),
-                        ),
-                      ),
-                    ),
-                  ),
                 if (_pairing)
                   SizedBox(
                     width: double.infinity,
@@ -691,7 +728,7 @@ class _DevicePairingScreenState extends State<DevicePairingScreen>
       case _PairingPhase.scanning:
         return 'Keep your device nearby with Bluetooth enabled';
       case _PairingPhase.found:
-        return 'Device detected! Setting up connection…';
+        return 'Tap "Connect & Pair" to set up this device';
       case _PairingPhase.pairing:
         return 'This may take up to 2 minutes. Don\'t close the app.';
       case _PairingPhase.success:
