@@ -36,7 +36,7 @@ dependencies:
   cupertino_icons: ^1.0.8
   tuya_flutter_ha_sdk: ^0.0.1
   shared_preferences: ^2.3.4
-
+  wifi_scan: ^0.4.1+2
 dev_dependencies:
   flutter_test:
     sdk: flutter

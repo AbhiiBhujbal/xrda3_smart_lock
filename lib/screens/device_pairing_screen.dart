@@ -3,6 +3,7 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:tuya_flutter_ha_sdk/tuya_flutter_ha_sdk.dart';
+import 'package:wifi_scan/wifi_scan.dart';
 
 class DevicePairingScreen extends StatefulWidget {
   final int homeId;
@@ -423,6 +424,143 @@ class _DevicePairingScreenState extends State<DevicePairingScreen>
     });
   }
 
+  Future<List<WiFiAccessPoint>> _scanWifi() async {
+    final can = await WiFiScan.instance.canStartScan();
+
+    if (can == CanStartScan.yes) {
+      await WiFiScan.instance.startScan();
+      await Future.delayed(const Duration(seconds: 2));
+      return await WiFiScan.instance.getScannedResults();
+    } else {
+      return [];
+    }
+  }
+
+  bool _is5GHz(WiFiAccessPoint wifi) {
+    return wifi.frequency > 4900;
+  }
+
+  void _showWifiListDialog() async {
+    List<WiFiAccessPoint> wifiList = await _scanWifi();
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) {
+        return Container(
+          height: MediaQuery.of(context).size.height * 0.75,
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+          ),
+          child: Column(
+            children: [
+              const SizedBox(height: 12),
+
+              // 🔘 Top handle
+              Container(
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade300,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+
+              const SizedBox(height: 16),
+
+              // 📝 Title
+              const Text(
+                "Select a Wi-Fi Network from the List",
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+
+              const SizedBox(height: 6),
+
+              const Text(
+                "Choose Wi-Fi and enter password",
+                style: TextStyle(color: Colors.grey),
+              ),
+
+              const SizedBox(height: 16),
+
+              // 📶 WIFI LIST
+              Expanded(
+                child: ListView.builder(
+                  itemCount: wifiList.length,
+                  itemBuilder: (context, index) {
+                    final wifi = wifiList[index];
+                    final is5G = _is5GHz(wifi);
+
+                    return ListTile(
+                      title: Text(
+                        wifi.ssid.isEmpty ? "Hidden Network" : wifi.ssid,
+                        style: TextStyle(
+                          color: is5G ? Colors.grey : Colors.black,
+                          fontWeight:
+                          is5G ? FontWeight.normal : FontWeight.w500,
+                        ),
+                      ),
+
+                      // 🔒 Lock icon (optional)
+                      leading: const Icon(Icons.lock_outline, size: 18),
+
+                      // 📡 Right side
+                      trailing: is5G
+                          ? const Text(
+                        "5G",
+                        style: TextStyle(
+                          color: Colors.grey,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      )
+                          : const Icon(Icons.wifi),
+
+                      enabled: !is5G,
+
+                      onTap: is5G
+                          ? null
+                          : () {
+                        Navigator.pop(ctx);
+
+                        _ssidController.text = wifi.ssid;
+
+                        // Open your existing password dialog
+                        _showWifiDialog();
+                      },
+                    );
+                  },
+                ),
+              ),
+
+              // 🔽 Enter manually
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: ListTile(
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  tileColor: Colors.grey.shade100,
+                  title: const Text("Enter manually"),
+                  trailing: const Icon(Icons.arrow_forward_ios, size: 16),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _showWifiDialog();
+                  },
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+
   @override
   void dispose() {
     _radarController.dispose();
@@ -631,8 +769,18 @@ class _DevicePairingScreenState extends State<DevicePairingScreen>
                     width: double.infinity,
                     height: 52,
                     child: FilledButton.icon(
-                      onPressed: _showWifiDialog,
-                      icon: const Icon(Icons.wifi),
+                      onPressed: () async {
+                        String? currentSSID = await TuyaFlutterHaSdk.getSSID();
+
+                        bool is5G = currentSSID != null &&
+                            currentSSID.toLowerCase().contains("5g");
+
+                        if (is5G) {
+                          _showWifiListDialog(); // 🔥 NEW
+                        } else {
+                          _showWifiDialog(); // existing
+                        }
+                      },                      icon: const Icon(Icons.wifi),
                       label: const Text('Connect & Pair'),
                       style: FilledButton.styleFrom(
                         shape: RoundedRectangleBorder(

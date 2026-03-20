@@ -23,7 +23,7 @@ class SmartLockScreen extends StatefulWidget {
 
 class _SmartLockScreenState extends State<SmartLockScreen> {
   static const _lockExtras =
-      MethodChannel('xrda3_smart_lock/lock_extras');
+  MethodChannel('xrda3_smart_lock/lock_extras');
 
   Map<String, dynamic>? _deviceInfo;
   Map<String, dynamic> _dps = {};
@@ -47,7 +47,7 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
     super.initState();
 
     const EventChannel dpEventChannel =
-        EventChannel('tuya_flutter_ha_sdk/pairingEvents');
+    EventChannel('tuya_flutter_ha_sdk/pairingEvents');
     _dpEventSub = dpEventChannel.receiveBroadcastStream().listen((event) {
       debugPrint("PairingChannel Event: $event");
 
@@ -55,7 +55,7 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
         final jsonStr = event.replaceFirst("onDpUpdate:", "");
         try {
           final Map<String, dynamic> dpData =
-              Map<String, dynamic>.from(jsonDecode(jsonStr));
+          Map<String, dynamic>.from(jsonDecode(jsonStr));
           if (mounted) {
             setState(() {
               _dps.addAll(dpData);
@@ -95,7 +95,7 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
     try {
       if (widget.homeId != null) {
         final devices =
-            await TuyaFlutterHaSdk.getHomeDevices(homeId: widget.homeId!);
+        await TuyaFlutterHaSdk.getHomeDevices(homeId: widget.homeId!);
         if (devices != null) {
           final devList = List<Map<String, dynamic>>.from(
             devices.map((d) => Map<String, dynamic>.from(d as Map)),
@@ -148,8 +148,8 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
       );
       if (result != null && mounted) {
         final records = (result['records'] as List?)
-                ?.map((r) => Map<String, dynamic>.from(r as Map))
-                .toList() ??
+            ?.map((r) => Map<String, dynamic>.from(r as Map))
+            .toList() ??
             [];
         setState(() => _unlockHistory = records);
       }
@@ -314,7 +314,7 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
     setState(() => _actionLoading = true);
     try {
       await TuyaFlutterHaSdk.replyRequestUnlock(
-        devId: widget.devId, open: true);
+          devId: widget.devId, open: true);
       _showSnackBar('Remote unlock approved');
       await Future.delayed(const Duration(seconds: 2));
       await _refreshStatus();
@@ -335,7 +335,7 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
     setState(() => _actionLoading = true);
     try {
       await TuyaFlutterHaSdk.replyRequestUnlock(
-        devId: widget.devId, open: false);
+          devId: widget.devId, open: false);
       _showSnackBar('Remote unlock denied');
     } catch (e) {
       _showSnackBar('Failed: $e');
@@ -351,7 +351,7 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
 
     try {
       password = await _lockExtras.invokeMethod<String>(
-        'getDynamicPasswordBLE', {'devId': widget.devId});
+          'getDynamicPasswordBLE', {'devId': widget.devId});
     } catch (e) {
       debugPrint("BLE dynamic password failed: $e");
     }
@@ -360,7 +360,7 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
       try {
         source = 'WiFi';
         final wifiPwd = await TuyaFlutterHaSdk.dynamicWifiLockPassword(
-          devId: widget.devId);
+            devId: widget.devId);
         password = wifiPwd?.toString();
       } catch (e) {
         debugPrint("WiFi dynamic password failed: $e");
@@ -553,84 +553,84 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
             onPressed: _loading
                 ? null
                 : () {
-                    _refreshStatus();
-                    _checkBleStatus();
-                    _loadUnlockHistory();
-                  },
+              _refreshStatus();
+              _checkBleStatus();
+              _loadUnlockHistory();
+            },
           ),
         ],
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : RefreshIndicator(
-              onRefresh: () async {
-                await _refreshStatus();
-                _checkBleStatus();
-                _loadUnlockHistory();
-              },
-              child: ListView(
-                padding: const EdgeInsets.all(16),
-                children: [
-                  // ── Status Card (tappable) ──
-                  _buildStatusCard(cs, locked, iconUrl),
+        onRefresh: () async {
+          await _refreshStatus();
+          _checkBleStatus();
+          _loadUnlockHistory();
+        },
+        child: ListView(
+          padding: const EdgeInsets.all(16),
+          children: [
+            // ── Status Card (tappable) ──
+            _buildStatusCard(cs, locked, iconUrl),
 
-                  const SizedBox(height: 16),
+            const SizedBox(height: 16),
 
-                  // ── Quick Actions Row ──
-                  Row(
-                    children: [
-                      Expanded(
-                        child: FilledButton.icon(
-                          onPressed: _actionLoading ? null : _unlockBLE,
-                          icon: const Icon(Icons.lock_open, size: 18),
-                          label: const Text('Unlock'),
-                          style: FilledButton.styleFrom(
-                            minimumSize: const Size(0, 48),
-                            backgroundColor: cs.primary,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: OutlinedButton.icon(
-                          onPressed: _actionLoading ? null : _lockBLE,
-                          icon: const Icon(Icons.lock, size: 18),
-                          label: const Text('Lock'),
-                          style: OutlinedButton.styleFrom(
-                            minimumSize: const Size(0, 48),
-                          ),
-                        ),
-                      ),
-                    ],
+            // ── Quick Actions Row ──
+            Row(
+              children: [
+                Expanded(
+                  child: FilledButton.icon(
+                    onPressed: _actionLoading ? null : _unlockBLE,
+                    icon: const Icon(Icons.lock_open, size: 18),
+                    label: const Text('Unlock'),
+                    style: FilledButton.styleFrom(
+                      minimumSize: const Size(0, 48),
+                      backgroundColor: cs.primary,
+                    ),
                   ),
-
-                  const SizedBox(height: 16),
-
-                  // ── OTP & Passwords Section ──
-                  _buildOtpCard(cs),
-
-                  const SizedBox(height: 16),
-
-                  // ── WiFi Remote Unlock ──
-                  _buildWifiCard(cs),
-
-                  const SizedBox(height: 16),
-
-                  // ── Unlock History ──
-                  _buildHistoryCard(cs),
-
-                  const SizedBox(height: 16),
-
-                  // ── Recent Events (real-time) ──
-                  _buildEventsCard(cs),
-
-                  const SizedBox(height: 16),
-
-                  // ── Lock Details ──
-                  _buildDetailsCard(cs, locked),
-                ],
-              ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: _actionLoading ? null : _lockBLE,
+                    icon: const Icon(Icons.lock, size: 18),
+                    label: const Text('Lock'),
+                    style: OutlinedButton.styleFrom(
+                      minimumSize: const Size(0, 48),
+                    ),
+                  ),
+                ),
+              ],
             ),
+
+            const SizedBox(height: 16),
+
+            // ── OTP & Passwords Section ──
+            _buildOtpCard(cs),
+
+            const SizedBox(height: 16),
+
+            // ── WiFi Remote Unlock ──
+            _buildWifiCard(cs),
+
+            const SizedBox(height: 16),
+
+            // ── Unlock History ──
+            _buildHistoryCard(cs),
+
+            const SizedBox(height: 16),
+
+            // ── Recent Events (real-time) ──
+            _buildEventsCard(cs),
+
+            const SizedBox(height: 16),
+
+            // ── Lock Details ──
+            _buildDetailsCard(cs, locked),
+          ],
+        ),
+      ),
     );
   }
 
@@ -640,12 +640,12 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
       onTap: _actionLoading
           ? null
           : () {
-              if (locked == true) {
-                _unlockBLE();
-              } else {
-                _lockBLE();
-              }
-            },
+        if (locked == true) {
+          _unlockBLE();
+        } else {
+          _lockBLE();
+        }
+      },
       child: Card(
         elevation: 4,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
@@ -662,8 +662,8 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
                   child: Image.network(iconUrl, width: 72, height: 72,
                       fit: BoxFit.contain,
                       errorBuilder: (_, __, ___) => Icon(
-                            _lockIcon(locked), size: 72,
-                            color: _statusColor(cs, locked))),
+                          _lockIcon(locked), size: 72,
+                          color: _statusColor(cs, locked))),
                 )
               else
                 Icon(_lockIcon(locked), size: 72,
@@ -673,12 +673,12 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
                 locked == true
                     ? 'LOCKED'
                     : locked == false
-                        ? 'UNLOCKED'
-                        : 'STATUS UNKNOWN',
+                    ? 'UNLOCKED'
+                    : 'STATUS UNKNOWN',
                 style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                      fontWeight: FontWeight.bold,
-                      color: _statusColor(cs, locked),
-                    ),
+                  fontWeight: FontWeight.bold,
+                  color: _statusColor(cs, locked),
+                ),
               ),
               const SizedBox(height: 8),
               Row(
@@ -702,8 +702,8 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
                 Text(
                   locked == true ? 'Tap to unlock' : 'Tap to lock',
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                        color: _statusColor(cs, locked)?.withAlpha(180),
-                      ),
+                    color: _statusColor(cs, locked)?.withAlpha(180),
+                  ),
                 ),
               ],
               if (_actionLoading)
@@ -777,7 +777,7 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
             Text(
               'OTP: 5-min code  •  One-Time: single use  •  Timed: reusable for set hours',
               style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: cs.onSurfaceVariant),
+                  color: cs.onSurfaceVariant),
             ),
           ],
         ),
@@ -806,7 +806,7 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
             Text(
               'Press remote unlock on the lock first, then approve here.',
               style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: cs.onSurfaceVariant),
+                  color: cs.onSurfaceVariant),
             ),
             const SizedBox(height: 12),
             Row(
@@ -1089,8 +1089,8 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
     final timeStr = isCurrent
         ? 'Current'
         : '${event.time.hour.toString().padLeft(2, '0')}:'
-            '${event.time.minute.toString().padLeft(2, '0')}:'
-            '${event.time.second.toString().padLeft(2, '0')}';
+        '${event.time.minute.toString().padLeft(2, '0')}:'
+        '${event.time.second.toString().padLeft(2, '0')}';
 
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
