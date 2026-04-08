@@ -200,170 +200,170 @@ class _HomeScreenState extends State<HomeScreen> {
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : RefreshIndicator(
-              onRefresh: _loadData,
-              child: _devices.isEmpty
-                  ? ListView(
-                      children: [
-                        const SizedBox(height: 120),
-                        Icon(Icons.devices_other,
-                            size: 80, color: Colors.grey.shade400),
-                        const SizedBox(height: 16),
-                        Center(
-                          child: Text(
-                            'No devices yet',
-                            style: Theme.of(context)
-                                .textTheme
-                                .titleLarge
-                                ?.copyWith(color: cs.onSurfaceVariant),
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                        Center(
-                          child: Text(
-                            'Tap the button below to add your first device',
-                            style: Theme.of(context)
-                                .textTheme
-                                .bodyMedium
-                                ?.copyWith(color: cs.onSurfaceVariant),
-                          ),
-                        ),
-                        const SizedBox(height: 24),
-                        Center(
-                          child: FilledButton.icon(
-                            onPressed: () async {
-                              int? homeId = _homeId;
-                              if (homeId == null) {
-                                try {
-                                  _showSnackBar('Setting up your home…');
-                                  homeId =
-                                      await TuyaFlutterHaSdk.createHome(
-                                    name: 'My Home',
-                                    longitude: 0.0,
-                                    latitude: 0.0,
-                                    geoName: '',
-                                    rooms: ['Default Room'],
-                                  );
-                                  setState(() => _homeId = homeId);
-                                } catch (e) {
-                                  debugPrint('Create home error: $e');
-                                  _showSnackBar('Could not create home: $e');
-                                  return;
-                                }
-                              }
-                              if (!mounted) return;
-                              await Navigator.push(
-                                context,
-                                MaterialPageRoute(
-                                  builder: (_) =>
-                                      DevicePairingScreen(homeId: homeId!),
-                                ),
-                              );
-                              _loadData();
-                            },
-                            icon: const Icon(Icons.add),
-                            label: const Text('Add Device'),
-                          ),
-                        ),
-                      ],
-                    )
-                  : ListView.builder(
-                      padding: const EdgeInsets.fromLTRB(16, 8, 16, 80),
-                      itemCount: _devices.length + 1, // +1 for header
-                      itemBuilder: (context, index) {
-                        if (index == 0) {
-                          // Header with device count
-                          return Padding(
-                            padding: const EdgeInsets.symmetric(vertical: 8),
-                            child: Text(
-                              '${_devices.length} Device${_devices.length == 1 ? '' : 's'}',
-                              style: Theme.of(context).textTheme.titleMedium,
-                            ),
-                          );
-                        }
-
-                        final device = _devices[index - 1];
-                        final devId =
-                            device['devId']?.toString() ?? device['id']?.toString() ?? '';
-                        final name = device['name']?.toString() ?? 'Device';
-                        final isOnline = device['isOnline'] == true;
-                        final category = device['category']?.toString();
-
-                        return Card(
-                          margin: const EdgeInsets.only(bottom: 8),
-                          child: ListTile(
-                            contentPadding: const EdgeInsets.symmetric(
-                                horizontal: 16, vertical: 4),
-                            leading: CircleAvatar(
-                              backgroundColor: isOnline
-                                  ? cs.primaryContainer
-                                  : cs.surfaceContainerHighest,
-                              child: Icon(
-                                _deviceIcon(category),
-                                color: isOnline
-                                    ? cs.primary
-                                    : cs.onSurfaceVariant,
-                              ),
-                            ),
-                            title: Text(name),
-                            subtitle: Row(
-                              children: [
-                                Container(
-                                  width: 8,
-                                  height: 8,
-                                  decoration: BoxDecoration(
-                                    color: isOnline
-                                        ? Colors.green
-                                        : Colors.grey,
-                                    shape: BoxShape.circle,
-                                  ),
-                                ),
-                                const SizedBox(width: 6),
-                                Text(
-                                  isOnline ? 'Online' : 'Offline',
-                                  style: TextStyle(
-                                    color: isOnline
-                                        ? Colors.green
-                                        : Colors.grey,
-                                  ),
-                                ),
-                              ],
-                            ),
-                            trailing: IconButton(
-                              icon: const Icon(Icons.delete_outline),
-                              onPressed: () => _removeDevice(devId),
-                            ),
-                              onTap: () async {
-                                print("Opening lock screen for devId: $devId");
-                                print("Device category: $category");
-                                print("Device name: $name");
-
-                                final isLock =
-                                    (category?.toLowerCase().contains('lock') ?? false) ||
-                                        name.toLowerCase().contains('lock');
-
-                                final screen = isLock
-                                    ? SmartLockScreen(
-                                  devId: devId,
-                                  deviceName: name,
-                                  homeId: _homeId,
-                                )
-                                    : DeviceControlScreen(
-                                  devId: devId,
-                                  deviceName: name,
-                                );
-
-                                await Navigator.push(
-                                  context,
-                                  MaterialPageRoute(builder: (_) => screen),
-                                );
-
-                                _loadData();
-                              }
-                          ),
-                        );
-                      },
-                    ),
+        onRefresh: _loadData,
+        child: _devices.isEmpty
+            ? ListView(
+          children: [
+            const SizedBox(height: 120),
+            Icon(Icons.devices_other,
+                size: 80, color: Colors.grey.shade400),
+            const SizedBox(height: 16),
+            Center(
+              child: Text(
+                'No devices yet',
+                style: Theme.of(context)
+                    .textTheme
+                    .titleLarge
+                    ?.copyWith(color: cs.onSurfaceVariant),
+              ),
             ),
+            const SizedBox(height: 8),
+            Center(
+              child: Text(
+                'Tap the button below to add your first device',
+                style: Theme.of(context)
+                    .textTheme
+                    .bodyMedium
+                    ?.copyWith(color: cs.onSurfaceVariant),
+              ),
+            ),
+            const SizedBox(height: 24),
+            Center(
+              child: FilledButton.icon(
+                onPressed: () async {
+                  int? homeId = _homeId;
+                  if (homeId == null) {
+                    try {
+                      _showSnackBar('Setting up your home…');
+                      homeId =
+                      await TuyaFlutterHaSdk.createHome(
+                        name: 'My Home',
+                        longitude: 0.0,
+                        latitude: 0.0,
+                        geoName: '',
+                        rooms: ['Default Room'],
+                      );
+                      setState(() => _homeId = homeId);
+                    } catch (e) {
+                      debugPrint('Create home error: $e');
+                      _showSnackBar('Could not create home: $e');
+                      return;
+                    }
+                  }
+                  if (!mounted) return;
+                  await Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) =>
+                          DevicePairingScreen(homeId: homeId!),
+                    ),
+                  );
+                  _loadData();
+                },
+                icon: const Icon(Icons.add),
+                label: const Text('Add Device'),
+              ),
+            ),
+          ],
+        )
+            : ListView.builder(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 80),
+          itemCount: _devices.length + 1, // +1 for header
+          itemBuilder: (context, index) {
+            if (index == 0) {
+              // Header with device count
+              return Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Text(
+                  '${_devices.length} Device${_devices.length == 1 ? '' : 's'}',
+                  style: Theme.of(context).textTheme.titleMedium,
+                ),
+              );
+            }
+
+            final device = _devices[index - 1];
+            final devId =
+                device['devId']?.toString() ?? device['id']?.toString() ?? '';
+            final name = device['name']?.toString() ?? 'Device';
+            final isOnline = device['isOnline'] == true;
+            final category = device['category']?.toString();
+
+            return Card(
+              margin: const EdgeInsets.only(bottom: 8),
+              child: ListTile(
+                  contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 16, vertical: 4),
+                  leading: CircleAvatar(
+                    backgroundColor: isOnline
+                        ? cs.primaryContainer
+                        : cs.surfaceContainerHighest,
+                    child: Icon(
+                      _deviceIcon(category),
+                      color: isOnline
+                          ? cs.primary
+                          : cs.onSurfaceVariant,
+                    ),
+                  ),
+                  title: Text(name),
+                  subtitle: Row(
+                    children: [
+                      Container(
+                        width: 8,
+                        height: 8,
+                        decoration: BoxDecoration(
+                          color: isOnline
+                              ? Colors.green
+                              : Colors.grey,
+                          shape: BoxShape.circle,
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        isOnline ? 'Online' : 'Offline',
+                        style: TextStyle(
+                          color: isOnline
+                              ? Colors.green
+                              : Colors.grey,
+                        ),
+                      ),
+                    ],
+                  ),
+                  trailing: IconButton(
+                    icon: const Icon(Icons.delete_outline),
+                    onPressed: () => _removeDevice(devId),
+                  ),
+                  onTap: () async {
+                    print("Opening lock screen for devId: $devId");
+                    print("Device category: $category");
+                    print("Device name: $name");
+
+                    final isLock =
+                        (category?.toLowerCase().contains('lock') ?? false) ||
+                            name.toLowerCase().contains('lock');
+
+                    final screen = isLock
+                        ? SmartLockScreen(
+                      devId: devId,
+                      deviceName: name,
+                      homeId: _homeId,
+                    )
+                        : DeviceControlScreen(
+                      devId: devId,
+                      deviceName: name,
+                    );
+
+                    await Navigator.push(
+                      context,
+                      MaterialPageRoute(builder: (_) => screen),
+                    );
+
+                    _loadData();
+                  }
+              ),
+            );
+          },
+        ),
+      ),
     );
   }
 }

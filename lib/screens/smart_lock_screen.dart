@@ -21,7 +21,8 @@ class SmartLockScreen extends StatefulWidget {
   State<SmartLockScreen> createState() => _SmartLockScreenState();
 }
 
-class _SmartLockScreenState extends State<SmartLockScreen> {
+class _SmartLockScreenState extends State<SmartLockScreen>
+    with WidgetsBindingObserver {
   static const _lockExtras =
       MethodChannel('xrda3_smart_lock/lock_extras');
 
@@ -30,6 +31,7 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
   bool _loading = true;
   bool _actionLoading = false;
   Timer? _refreshTimer;
+  Timer? _bleCheckTimer;
 
   // Recent lock events (alarms, unlock events) from DP updates
   final List<_LockEvent> _recentEvents = [];
@@ -42,9 +44,22 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
   // BLE connection status
   bool _bleConnected = false;
 
+  // Remote unlock request listener
+  StreamSubscription? _remoteUnlockSub;
+  bool _remoteUnlockEnabled = false;
+  int _remoteUnlockCountdown = 0;
+  Timer? _countdownTimer;
+
+  // Doorbell debounce — prevent multiple launches
+  DateTime? _lastDoorbellLaunch;
+
+  // Grace period: suppress DP-18 auto-relock updates right after user unlock
+  DateTime? _unlockGraceUntil;
+
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
 
     const EventChannel dpEventChannel =
         EventChannel('tuya_flutter_ha_sdk/pairingEvents');
@@ -57,10 +72,48 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
           final Map<String, dynamic> dpData =
               Map<String, dynamic>.from(jsonDecode(jsonStr));
           if (mounted) {
+            // During grace period, ignore ALL lock-state DP updates
+            // from the device's auto-lock so the UI stays on "unlocked"
+            // until the user explicitly taps Lock.
+            if (_unlockGraceUntil != null &&
+                DateTime.now().isBefore(_unlockGraceUntil!)) {
+              for (final dpKey in _lockStateDps) {
+                if (dpData.containsKey(dpKey)) {
+                  final raw = dpData[dpKey];
+                  final state = raw?.toString().toLowerCase().trim();
+                  final isLocking = (raw == true) ||
+                      state == 'closed' ||
+                      state == 'true' ||
+                      state == '1';
+                  if (isLocking) {
+                    debugPrint("Suppressed auto-relock DP-$dpKey during grace period");
+                    dpData.remove(dpKey);
+                  }
+                }
+              }
+              if (dpData.isEmpty) return;
+            }
             setState(() {
               _dps.addAll(dpData);
               _processLockEvents(dpData);
             });
+
+            // ── Handle doorbell (DP 53) and video (DP 212) events ──
+            // IMPORTANT: Only trigger on small DP updates (actual events),
+            // NOT on full status dumps (which have 10+ DPs and include stale "53":true).
+            final isRealEvent = dpData.length <= 3; // Real events have 1-3 DPs
+            if (isRealEvent) {
+              if (dpData.containsKey('53') && dpData['53'] == true) {
+                _handleDoorbellEvent(dpData);
+              } else if (dpData.containsKey('212') &&
+                  dpData['212'].toString().isNotEmpty &&
+                  dpData['212'].toString() != '') {
+                debugPrint('📹 Lock camera event (DP 212)');
+                _launchDoorbellCall();
+              }
+            } else if (dpData.length > 3) {
+              debugPrint('Ignoring doorbell in full DP dump (${dpData.length} DPs)');
+            }
           }
         } catch (e) {
           debugPrint("Failed to parse DP update: $e");
@@ -72,6 +125,14 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
     _initAndLoad();
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && mounted) {
+      _checkBleStatus();
+      _refreshStatus();
+    }
+  }
+
   Future<void> _initAndLoad() async {
     setState(() => _loading = true);
 
@@ -81,17 +142,163 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
       }
       await TuyaFlutterHaSdk.initDevice(devId: widget.devId);
       await _refreshStatus();
-      _checkBleStatus();
+      await _checkBleStatus();
       _loadUnlockHistory();
+      _registerRemoteUnlockListener();
+      _checkRemoteUnlockEnabled();
     } catch (e) {
       debugPrint("initDevice error: $e");
     }
 
     if (!mounted) return;
     setState(() => _loading = false);
+
+    // Poll BLE status every 5 seconds to keep the indicator accurate
+    _bleCheckTimer?.cancel();
+    _bleCheckTimer = Timer.periodic(
+      const Duration(seconds: 5),
+      (_) => _checkBleStatus(),
+    );
+  }
+
+  /// Register a listener for incoming remote unlock requests from the lock.
+  Future<void> _registerRemoteUnlockListener() async {
+    try {
+      await _lockExtras.invokeMethod(
+          'registerRemoteUnlockListener', {'devId': widget.devId});
+      debugPrint('Remote unlock listener registered');
+    } catch (e) {
+      debugPrint('registerRemoteUnlockListener error: $e');
+    }
+
+    // Listen for remote unlock events
+    _remoteUnlockSub?.cancel();
+    const remoteChannel =
+        EventChannel('xrda3_smart_lock/remote_unlock_events');
+    _remoteUnlockSub =
+        remoteChannel.receiveBroadcastStream().listen((event) {
+      if (event is Map && event['event'] == 'remote_unlock_request') {
+        final countdown = event['countdown'] as int? ?? 30;
+        debugPrint('Remote unlock request! Countdown: ${countdown}s');
+        if (mounted) {
+          _showRemoteUnlockDialog(countdown);
+        }
+      }
+    });
+  }
+
+  /// Check if remote unlock is enabled on this lock.
+  Future<void> _checkRemoteUnlockEnabled() async {
+    try {
+      final enabled = await _lockExtras.invokeMethod<bool>(
+            'fetchRemoteUnlockEnabled',
+            {'devId': widget.devId},
+          ) ??
+          false;
+      if (mounted) setState(() => _remoteUnlockEnabled = enabled);
+    } catch (e) {
+      debugPrint('checkRemoteUnlockEnabled error: $e');
+    }
+  }
+
+  /// Show dialog when lock sends a remote unlock request.
+  void _showRemoteUnlockDialog(int seconds) {
+    _remoteUnlockCountdown = seconds;
+    _countdownTimer?.cancel();
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setDialogState) {
+            // Start countdown timer
+            _countdownTimer?.cancel();
+            _countdownTimer =
+                Timer.periodic(const Duration(seconds: 1), (timer) {
+              if (_remoteUnlockCountdown <= 0) {
+                timer.cancel();
+                Navigator.of(ctx, rootNavigator: true).pop();
+                _showSnackBar('Remote unlock request expired');
+              } else {
+                setDialogState(() => _remoteUnlockCountdown--);
+              }
+            });
+
+            return AlertDialog(
+              icon: const Icon(Icons.lock_open, size: 48, color: Colors.orange),
+              title: const Text('Remote Unlock Request'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text('Someone pressed the button on your lock.'),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Approve unlock? (${_remoteUnlockCountdown}s remaining)',
+                    style: const TextStyle(fontWeight: FontWeight.bold),
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () async {
+                    _countdownTimer?.cancel();
+                    Navigator.pop(ctx);
+                    await _replyRemoteUnlock(false);
+                  },
+                  child: const Text('Deny'),
+                ),
+                FilledButton.icon(
+                  onPressed: () async {
+                    _countdownTimer?.cancel();
+                    Navigator.pop(ctx);
+                    await _replyRemoteUnlock(true);
+                  },
+                  icon: const Icon(Icons.lock_open),
+                  label: const Text('Approve Unlock'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  /// Reply to a remote unlock request.
+  Future<void> _replyRemoteUnlock(bool allow) async {
+    setState(() => _actionLoading = true);
+    try {
+      await _lockExtras.invokeMethod('replyRemoteUnlock', {
+        'devId': widget.devId,
+        'allow': allow,
+      });
+      _showSnackBar(allow ? 'Unlock approved!' : 'Unlock denied');
+      if (allow) {
+        final dpKey = _lockDpKey;
+        setState(() {
+          _dps[dpKey] = dpKey == '47' ? false : 'opened';
+        });
+        _unlockGraceUntil = DateTime.now().add(const Duration(seconds: 30));
+      }
+    } catch (e) {
+      _showSnackBar('Reply failed: $e');
+    }
+    if (mounted) setState(() => _actionLoading = false);
   }
 
   Future<void> _refreshStatus() async {
+    // During unlock grace period, preserve ALL lock-state DPs
+    // so the UI doesn't snap back to "locked" from server data.
+    final bool inGracePeriod = _unlockGraceUntil != null &&
+        DateTime.now().isBefore(_unlockGraceUntil!);
+    final Map<String, dynamic> savedLockDps = {};
+    if (inGracePeriod) {
+      for (final dp in _lockStateDps) {
+        if (_dps.containsKey(dp)) savedLockDps[dp] = _dps[dp];
+      }
+    }
+
     try {
       if (widget.homeId != null) {
         final devices =
@@ -108,6 +315,10 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
               if (info['dps'] != null) {
                 _dps = Map<String, dynamic>.from(info['dps'] as Map);
               }
+              // Restore lock DPs during grace period to keep "unlocked" state
+              if (inGracePeriod) {
+                savedLockDps.forEach((k, v) => _dps[k] = v);
+              }
             });
             return;
           }
@@ -122,6 +333,9 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
         setState(() {
           _deviceInfo = info;
           _dps = Map<String, dynamic>.from(info['dps'] ?? {});
+          if (inGracePeriod) {
+            savedLockDps.forEach((k, v) => _dps[k] = v);
+          }
         });
       }
     } catch (e) {
@@ -135,7 +349,11 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
         'isBLEConnected',
         {'devId': widget.devId},
       );
-      if (mounted) setState(() => _bleConnected = connected ?? false);
+      final newVal = connected ?? false;
+      // Only rebuild if the value actually changed — prevents flicker
+      if (mounted && newVal != _bleConnected) {
+        setState(() => _bleConnected = newVal);
+      }
     } catch (_) {}
   }
 
@@ -159,73 +377,191 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
     if (mounted) setState(() => _historyLoading = false);
   }
 
-  // ── Lock State ──
-  bool? get _isLocked {
-    if (_dps.containsKey('18')) {
-      final raw = _dps['18'];
-      final state = raw?.toString().toLowerCase().trim();
-      if (raw is bool) return raw;
-      if (state == 'closed' || state == 'true' || state == '1') return true;
-      if (state == 'opened' || state == 'false' || state == '0') return false;
-      return null;
+  // ═══════════════════════════════════════════════════════════
+  // UNIVERSAL TUYA LOCK DP MAP
+  // Supports all known DP versions from oldest to newest.
+  // ═══════════════════════════════════════════════════════════
+
+  // Lock state DPs — priority order (first non-empty wins)
+  // DP 47: bool  — most common (true=locked, false=unlocked)
+  // DP 18: mixed — older models ("closed"/"opened", bool, or "1"/"0")
+  // DP 2:  bool  — some basic locks (true=locked)
+  // DP 15: bool  — some ZigBee locks
+  // DP 36: bool  — some cat-eye locks
+  static const _lockStateDps = ['47', '18', '2', '15', '36'];
+
+  // Unlock method DPs
+  // DP 1:  unlock record (finger/password/card/key/remote/face)
+  // DP 10: unlock record in some newer models
+  // DP 5:  unlock method on some models
+  static const _unlockMethodDps = ['1', '10', '5'];
+
+  // Alarm DP
+  // DP 8:  alarm events (wrong_finger, pry, etc.)
+  // DP 21: alarm on some models
+  static const _alarmDps = ['8', '21'];
+
+  // Battery DP
+  // DP 45: battery percentage (most common)
+  // DP 12: battery on some models
+  static const _batteryDps = ['45', '12'];
+
+  // Other feature DPs
+  // DP 11: volume          DP 17: child lock
+  // DP 19: auto-lock       DP 39: lock mode
+  // DP 52: anti-lock       DP 53: do-not-disturb
+  // DP 63: lock times      DP 98: manual lock
+
+  /// Auto-detect which DP key this lock uses for its lock state.
+  String get _lockDpKey {
+    for (final dp in _lockStateDps) {
+      if (_dps.containsKey(dp)) {
+        final val = _dps[dp];
+        // Skip empty strings and null — means this lock doesn't use this DP
+        if (val == null) continue;
+        if (val is String && val.trim().isEmpty) continue;
+        return dp;
+      }
     }
-    if (_dps.containsKey('47')) return _dps['47'] == true;
+    return '47'; // safe default
+  }
+
+  /// All lock-state DP keys that have actual values in this device.
+  /// Used for grace-period protection so no lock DP can sneak through.
+  List<String> get _activeLockDps {
+    return _lockStateDps.where((dp) {
+      if (!_dps.containsKey(dp)) return false;
+      final val = _dps[dp];
+      if (val == null) return false;
+      if (val is String && val.trim().isEmpty) return false;
+      return true;
+    }).toList();
+  }
+
+  // ── Lock State (universal) ──
+  bool? get _isLocked {
+    final key = _lockDpKey;
+    final raw = _dps[key];
+    if (raw == null) return null;
+
+    if (raw is bool) return raw;
+
+    final state = raw.toString().toLowerCase().trim();
+    if (state.isEmpty) return null;
+    if (state == 'closed' || state == 'true' || state == '1') return true;
+    if (state == 'opened' || state == 'false' || state == '0') return false;
     return null;
   }
 
+  /// Read battery from whichever DP reports it.
+  int? get _batteryLevel {
+    for (final dp in _batteryDps) {
+      final val = _dps[dp];
+      if (val is int) return val;
+      if (val is double) return val.toInt();
+      final parsed = int.tryParse(val?.toString() ?? '');
+      if (parsed != null) return parsed;
+    }
+    return null;
+  }
+
+  /// Read the last unlock method from whichever DP reports it.
   String get _lastUnlockMethod {
-    final val = _dps['1'];
-    if (val == null) return 'Unknown';
-    switch (val.toString()) {
+    for (final dp in _unlockMethodDps) {
+      final val = _dps[dp];
+      if (val != null && val.toString().isNotEmpty) {
+        return _unlockMethodName(val.toString());
+      }
+    }
+    return 'Unknown';
+  }
+
+  /// Read the latest alarm from whichever DP reports it.
+  String? get _currentAlarm {
+    for (final dp in _alarmDps) {
+      final val = _dps[dp];
+      if (val != null && val.toString().isNotEmpty && val != false) {
+        return _alarmTitle(val.toString());
+      }
+    }
+    return null;
+  }
+
+  String _unlockMethodName(String val) {
+    switch (val) {
       case '1': return 'Fingerprint';
       case '2': return 'Password';
       case '3': return 'Card';
       case '4': return 'Key';
       case '5': return 'Remote';
       case '6': return 'Face';
+      case '7': return 'Eye';
+      case '8': return 'Palm';
+      case '9': return 'Finger Vein';
       default: return 'Method $val';
     }
   }
 
   bool get _isOnline => _deviceInfo?['isOnline'] == true;
 
-  // ── Event Processing ──
+  // ── Event Processing (universal DP support) ──
   void _processLockEvents(Map<String, dynamic> dpData) {
     final now = DateTime.now();
+    bool hasLockStateEvent = false;
 
-    if (dpData.containsKey('8')) {
-      final alarm = dpData['8'].toString();
-      _recentEvents.insert(0, _LockEvent(
-        time: now,
-        type: _LockEventType.alarm,
-        title: _alarmTitle(alarm),
-        detail: alarm,
-      ));
+    // Check all alarm DPs (8, 21, ...)
+    for (final dp in _alarmDps) {
+      if (dpData.containsKey(dp)) {
+        final val = dpData[dp];
+        if (val != null && val != false && val.toString().isNotEmpty) {
+          _recentEvents.insert(0, _LockEvent(
+            time: now,
+            type: _LockEventType.alarm,
+            title: _alarmTitle(val.toString()),
+            detail: val.toString(),
+          ));
+        }
+      }
     }
 
-    if (dpData.containsKey('18')) {
-      final raw = dpData['18'];
-      final state = raw.toString().toLowerCase().trim();
-      final isLocked = (raw == true) ||
-          state == 'closed' ||
-          state == 'true' ||
-          state == '1';
-      _recentEvents.insert(0, _LockEvent(
-        time: now,
-        type: isLocked ? _LockEventType.locked : _LockEventType.unlocked,
-        title: isLocked ? 'Door Locked' : 'Door Unlocked',
-        detail: state,
-      ));
+    // Check all lock-state DPs (47, 18, 2, 15, 36, ...)
+    for (final dp in _lockStateDps) {
+      if (dpData.containsKey(dp) && !hasLockStateEvent) {
+        final raw = dpData[dp];
+        if (raw == null) continue;
+        final state = raw.toString().toLowerCase().trim();
+        if (state.isEmpty) continue;
+
+        final isLocked = (raw == true) ||
+            state == 'closed' ||
+            state == 'true' ||
+            state == '1';
+        _recentEvents.insert(0, _LockEvent(
+          time: now,
+          type: isLocked ? _LockEventType.locked : _LockEventType.unlocked,
+          title: isLocked ? 'Door Locked' : 'Door Unlocked',
+          detail: 'DP $dp: $state',
+        ));
+        hasLockStateEvent = true;
+      }
     }
 
-    if (dpData.containsKey('1') && !dpData.containsKey('18')) {
-      final method = dpData['1'].toString();
-      _recentEvents.insert(0, _LockEvent(
-        time: now,
-        type: _LockEventType.unlocked,
-        title: 'Unlocked via ${_unlockMethodName(method)}',
-        detail: method,
-      ));
+    // Check all unlock method DPs (1, 10, 5, ...) — only if no lock state event
+    if (!hasLockStateEvent) {
+      for (final dp in _unlockMethodDps) {
+        if (dpData.containsKey(dp)) {
+          final method = dpData[dp].toString();
+          if (method.isNotEmpty) {
+            _recentEvents.insert(0, _LockEvent(
+              time: now,
+              type: _LockEventType.unlocked,
+              title: 'Unlocked via ${_unlockMethodName(method)}',
+              detail: method,
+            ));
+            break;
+          }
+        }
+      }
     }
 
     if (_recentEvents.length > 20) {
@@ -255,15 +591,17 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
     }
   }
 
-  String _unlockMethodName(String val) {
-    switch (val) {
-      case '1': return 'Fingerprint';
-      case '2': return 'Password';
-      case '3': return 'Card';
-      case '4': return 'Key';
-      case '5': return 'Remote';
-      case '6': return 'Face';
-      default: return 'Method $val';
+  // ── Matter Detection ──
+  Future<bool> _isMatterDevice() async {
+    try {
+      final isMatter = await TuyaFlutterHaSdk.checkIsMatter(
+        devId: widget.devId,
+      );
+      debugPrint('Matter check: $isMatter');
+      return isMatter == true;
+    } catch (e) {
+      debugPrint('Matter check failed (assuming non-Matter): $e');
+      return false;
     }
   }
 
@@ -274,10 +612,41 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
       if (widget.homeId != null) {
         await TuyaFlutterHaSdk.getHomeDevices(homeId: widget.homeId!);
       }
-      await TuyaFlutterHaSdk.unlockBLELock(devId: widget.devId);
-      _showSnackBar('Lock opened via BLE');
-      await Future.delayed(const Duration(seconds: 2));
-      await _refreshStatus();
+
+      // Check if this is a Matter device — use different unlock method
+      final isMatter = await _isMatterDevice();
+      if (isMatter) {
+        await TuyaFlutterHaSdk.controlMatter(
+          devId: widget.devId,
+          dps: {'1': true},
+        );
+      } else {
+        // Try our robust unlock first (syncs member data + V3 fallback)
+        // Falls back to SDK's built-in unlock if robust fails
+        try {
+          await _lockExtras.invokeMethod('robustBleUnlock', {'devId': widget.devId});
+        } catch (robustErr) {
+          debugPrint('Robust unlock failed ($robustErr), trying SDK unlock');
+          await TuyaFlutterHaSdk.unlockBLELock(devId: widget.devId);
+        }
+      }
+      _showSnackBar('Lock opened via ${isMatter ? "Matter" : "BLE"}');
+
+      // Set optimistic unlocked state immediately in the UI
+      final dpKey = _lockDpKey;
+      setState(() {
+        if (dpKey == '47') {
+          _dps['47'] = false; // DP 47: false = unlocked
+        } else {
+          _dps['18'] = 'opened';
+        }
+      });
+
+      // Grace period: ignore auto-relock DP updates for 30 seconds
+      // so the UI stays "unlocked" until the user manually taps Lock.
+      _unlockGraceUntil = DateTime.now().add(const Duration(seconds: 30));
+
+      _checkBleStatus();
     } catch (e) {
       final errStr = e.toString();
       if (errStr.contains('Empty key') || errStr.contains('SecretKeySpec')) {
@@ -290,43 +659,429 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
   }
 
   Future<void> _lockBLE() async {
+    _unlockGraceUntil = null;
     setState(() => _actionLoading = true);
+    debugPrint('=== LOCK ATTEMPT START ===');
+
+    // Strategy 1: Publish DP 47=true via WiFi lock instance (uses LAN like Smart Life)
     try {
-      if (widget.homeId != null) {
-        await TuyaFlutterHaSdk.getHomeDevices(homeId: widget.homeId!);
-      }
-      await TuyaFlutterHaSdk.lockBLELock(devId: widget.devId);
-      _showSnackBar('Lock closed via BLE');
-      await Future.delayed(const Duration(seconds: 2));
-      await _refreshStatus();
+      debugPrint('Trying publishDpViaWifiLock (DP 47=true, LAN)...');
+      await _lockExtras.invokeMethod('publishDpViaWifiLock', {
+        'devId': widget.devId,
+        'dpId': '47',
+        'dpValue': true,
+      });
+      debugPrint('publishDpViaWifiLock SUCCESS!');
+      _showSnackBar('Door locked!');
+      setState(() => _dps['47'] = true);
+      if (mounted) setState(() => _actionLoading = false);
+      return;
     } catch (e) {
-      _showSnackBar('BLE lock failed: $e');
+      debugPrint('publishDpViaWifiLock FAILED: $e');
     }
-    if (mounted) setState(() => _actionLoading = false);
+
+    // Strategy 2: Publish DP 8=true via WiFi lock instance (manual_lock)
+    try {
+      debugPrint('Trying publishDpViaWifiLock (DP 8=true, LAN)...');
+      await _lockExtras.invokeMethod('publishDpViaWifiLock', {
+        'devId': widget.devId,
+        'dpId': '8',
+        'dpValue': true,
+      });
+      debugPrint('publishDpViaWifiLock DP8 SUCCESS!');
+      _showSnackBar('Door locked!');
+      setState(() => _dps['47'] = true);
+      if (mounted) setState(() => _actionLoading = false);
+      return;
+    } catch (e1) {
+      debugPrint('publishDpViaWifiLock DP8 FAILED: $e1');
+    }
+
+    // Strategy 3: BLE manual lock with auto-connect
+    try {
+      debugPrint('Trying bleManualLock (native with auto-connect)...');
+      await _lockExtras.invokeMethod('bleManualLock', {
+        'devId': widget.devId,
+      }).timeout(const Duration(seconds: 15));
+      debugPrint('bleManualLock SUCCESS!');
+      _showSnackBar('Door locked!');
+      setState(() => _dps['47'] = true);
+      if (mounted) setState(() => _actionLoading = false);
+      return;
+    } catch (e2) {
+      debugPrint('bleManualLock FAILED: $e2');
+    }
+
+    // Strategy 4: remoteSwitchLock(false)
+    try {
+      debugPrint('Trying remoteSwitchLock(false)...');
+      await _lockExtras.invokeMethod('remoteSwitchLock', {
+        'devId': widget.devId,
+        'open': false,
+      }).timeout(const Duration(seconds: 15));
+      debugPrint('remoteSwitchLock(lock) SUCCESS!');
+      _showSnackBar('Door locked remotely!');
+      setState(() => _dps['47'] = true);
+      if (mounted) setState(() => _actionLoading = false);
+      return;
+    } catch (e3) {
+      debugPrint('remoteSwitchLock(lock) FAILED: $e3');
+    }
+
+    debugPrint('=== ALL LOCK STRATEGIES FAILED ===');
+    if (mounted) {
+      setState(() => _actionLoading = false);
+      showDialog(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          icon: const Icon(Icons.info_outline, size: 36, color: Colors.orange),
+          title: const Text('Remote Lock Not Supported'),
+          content: const Text(
+            'This lock does not support remote locking from the app '
+            '(security feature to prevent lockouts).\n\n'
+            'Your lock will auto-relock after a few seconds. '
+            'You can also lock it manually using the lock\'s keypad or handle.',
+          ),
+          actions: [
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('OK'),
+            ),
+          ],
+        ),
+      );
+    }
   }
 
-  // ── WiFi Remote Unlock ──
-  Future<void> _wifiRemoteUnlock() async {
+  // ── WiFi Cloud Unlock ──
+  //
+  // IMPORTANT: Tuya WiFi locks use a REQUEST-REPLY pattern, not direct DP writes.
+  // DP 47 is READ-ONLY — it reports lock state but cannot be written to.
+  //
+  // Flow: User presses button on lock → lock sends remote unlock request →
+  // app receives it via RemoteUnlockListener → app replies allow/deny.
+  //
+  // If no pending request exists, we try replyRemoteUnlock first (in case
+  // there's one queued), then fall back to BLE if available.
+  Future<void> _wifiCloudUnlock() async {
     if (!_isOnline) {
       _showSnackBar('Device is offline.');
       return;
     }
     setState(() => _actionLoading = true);
+
+    // Strategy 1: remoteSwitchLock — the proper Tuya BLE Lock V2 API
+    // for remote unlock via cloud/LAN (same as Smart Life app)
     try {
-      await TuyaFlutterHaSdk.replyRequestUnlock(
-        devId: widget.devId, open: true);
-      _showSnackBar('Remote unlock approved');
-      await Future.delayed(const Duration(seconds: 2));
-      await _refreshStatus();
+      await _lockExtras.invokeMethod('remoteSwitchLock', {
+        'devId': widget.devId,
+        'open': true,
+      });
+      _showSnackBar('Remote unlock success!');
+      final dpKey = _lockDpKey;
+      setState(() {
+        _dps[dpKey] = dpKey == '47' ? false : 'opened';
+      });
+      _unlockGraceUntil = DateTime.now().add(const Duration(seconds: 30));
+      if (mounted) setState(() => _actionLoading = false);
+      return;
     } catch (e) {
-      final errStr = e.toString();
-      if (errStr.contains('OPERATE_NOT_SUPPORTED') ||
-          errStr.contains('no remote')) {
-        _showSnackBar('No pending unlock request from the lock.');
-      } else {
-        _showSnackBar('Remote unlock failed: $e');
-      }
+      debugPrint('remoteSwitchLock failed: $e — trying DP publish...');
     }
+
+    // Strategy 2: Direct DP publish (DP 47 is rw on this lock)
+    try {
+      await _lockExtras.invokeMethod('publishDp', {
+        'devId': widget.devId,
+        'dpId': _lockDpKey,
+        'dpValue': _lockDpKey == '47' ? false : 'opened',
+      });
+      _showSnackBar('WiFi unlock sent via DP!');
+      final dpKey = _lockDpKey;
+      setState(() {
+        _dps[dpKey] = dpKey == '47' ? false : 'opened';
+      });
+      _unlockGraceUntil = DateTime.now().add(const Duration(seconds: 30));
+      if (mounted) setState(() => _actionLoading = false);
+      return;
+    } catch (e2) {
+      debugPrint('DP publish also failed: $e2');
+    }
+
+    // Strategy 3: Reply to pending remote unlock request
+    try {
+      await _lockExtras.invokeMethod('replyRemoteUnlock', {
+        'devId': widget.devId,
+        'allow': true,
+      });
+      _showSnackBar('Remote unlock approved!');
+      final dpKey = _lockDpKey;
+      setState(() {
+        _dps[dpKey] = dpKey == '47' ? false : 'opened';
+      });
+      _unlockGraceUntil = DateTime.now().add(const Duration(seconds: 30));
+    } catch (e3) {
+      debugPrint('All unlock strategies failed: $e3');
+      _showSnackBar('WiFi unlock failed. Check logcat for details.');
+    }
+    if (mounted) setState(() => _actionLoading = false);
+  }
+
+  /// Dump device schema to see which DPs are rw/ro/wr.
+  // ── Doorbell & Video Lock Camera Events ──
+
+  /// Handle doorbell ring (DP 53 = true).
+  /// Often arrives together with DP 212 (video), but DP 53 may come first.
+  void _handleDoorbellEvent(Map<String, dynamic> dpData) {
+    debugPrint('🔔 Doorbell ring detected! Launching video call...');
+    // Launch native doorbell call Activity with live P2P video
+    _launchDoorbellCall();
+  }
+
+  /// Launch the native Android DoorbellCallActivity for full video call experience.
+  Future<void> _launchDoorbellCall() async {
+    // Debounce: prevent multiple launches within 10 seconds
+    if (_lastDoorbellLaunch != null &&
+        DateTime.now().difference(_lastDoorbellLaunch!).inSeconds < 10) {
+      debugPrint('Doorbell launch debounced');
+      return;
+    }
+    _lastDoorbellLaunch = DateTime.now();
+
+    try {
+      await _lockExtras.invokeMethod('launchDoorbellCall', {
+        'devId': widget.devId,
+        'deviceName': widget.deviceName,
+      });
+      debugPrint('DoorbellCallActivity launched');
+    } catch (e) {
+      debugPrint('Failed to launch doorbell call: $e');
+      // Fallback: show simple dialog
+      _showDoorbellDialog(null, null);
+    }
+  }
+
+  /// Handle DP 212 video event — decode hex JSON, extract snapshot + video URLs.
+  void _handleVideoEvent(String hexOrJson) {
+    try {
+      // DP 212 comes as hex-encoded JSON string
+      String jsonStr;
+      if (hexOrJson.startsWith('{')) {
+        jsonStr = hexOrJson; // already decoded
+      } else {
+        // Decode hex to ASCII
+        final bytes = <int>[];
+        for (var i = 0; i < hexOrJson.length - 1; i += 2) {
+          bytes.add(int.parse(hexOrJson.substring(i, i + 2), radix: 16));
+        }
+        jsonStr = String.fromCharCodes(bytes);
+      }
+
+      final Map<String, dynamic> videoData = jsonDecode(jsonStr);
+      debugPrint('📹 Lock video event: ${videoData['cmd']}');
+
+      final files = videoData['files'] as List<dynamic>? ?? [];
+      String? snapshotUrl;
+      String? videoUrl;
+      String? snapshotBucket;
+      String? snapshotPath;
+      String? videoBucket;
+      String? videoPath;
+
+      for (final file in files) {
+        if (file is List && file.length >= 2) {
+          final bucket = file[0].toString();
+          final path = file[1].toString();
+
+          if (path.endsWith('.jpg') || path.endsWith('.jpeg') || path.endsWith('.png')) {
+            snapshotBucket = bucket;
+            snapshotPath = path;
+            // Build URL — Tuya lock camera uses their CDN
+            snapshotUrl = 'https://$bucket.oss-ap-south-1.aliyuncs.com$path';
+          } else if (path.endsWith('.mjpeg') || path.endsWith('.mp4')) {
+            videoBucket = bucket;
+            videoPath = path;
+            videoUrl = 'https://$bucket.oss-ap-south-1.aliyuncs.com$path';
+          }
+        }
+      }
+
+      debugPrint('📸 Snapshot: $snapshotUrl');
+      debugPrint('🎥 Video: $videoUrl');
+
+      _showDoorbellDialog(snapshotUrl, videoUrl);
+    } catch (e) {
+      debugPrint('Failed to parse DP 212 video event: $e');
+      _showDoorbellDialog(null, null);
+    }
+  }
+
+  /// Show doorbell alert with optional snapshot and video.
+  void _showDoorbellDialog(String? snapshotUrl, String? videoUrl) {
+    if (!mounted) return;
+
+    // Don't show multiple dialogs
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        icon: const Icon(Icons.doorbell, size: 48, color: Colors.orange),
+        title: const Text('Doorbell Ring!'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('Someone is at the door'),
+            if (snapshotUrl != null) ...[
+              const SizedBox(height: 12),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: Image.network(
+                  snapshotUrl,
+                  height: 180,
+                  width: double.infinity,
+                  fit: BoxFit.cover,
+                  loadingBuilder: (_, child, progress) {
+                    if (progress == null) return child;
+                    return SizedBox(
+                      height: 180,
+                      child: Center(
+                        child: CircularProgressIndicator(
+                          value: progress.expectedTotalBytes != null
+                              ? progress.cumulativeBytesLoaded /
+                                  progress.expectedTotalBytes!
+                              : null,
+                        ),
+                      ),
+                    );
+                  },
+                  errorBuilder: (_, __, ___) => Container(
+                    height: 120,
+                    color: Colors.grey[200],
+                    child: const Center(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.image_not_supported, size: 32),
+                          SizedBox(height: 4),
+                          Text('Snapshot not accessible',
+                              style: TextStyle(fontSize: 12)),
+                          Text('(May need Tuya cloud auth)',
+                              style: TextStyle(fontSize: 10, color: Colors.grey)),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ] else ...[
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: Colors.grey[100],
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Column(
+                  children: [
+                    Icon(Icons.videocam, size: 32, color: Colors.grey),
+                    SizedBox(height: 4),
+                    Text('No snapshot available',
+                        style: TextStyle(fontSize: 12, color: Colors.grey)),
+                  ],
+                ),
+              ),
+            ],
+            if (videoUrl != null) ...[
+              const SizedBox(height: 8),
+              Text('Video clip available',
+                  style: TextStyle(fontSize: 11, color: Colors.grey[600])),
+            ],
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Dismiss'),
+          ),
+          FilledButton.icon(
+            onPressed: () {
+              Navigator.pop(ctx);
+              // TODO: Open live camera view or play video
+              _showSnackBar('Video playback coming soon');
+            },
+            icon: const Icon(Icons.videocam),
+            label: const Text('View'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _dumpDeviceSchema() async {
+    try {
+      final schema = await _lockExtras.invokeMethod<List>(
+        'getDeviceSchema',
+        {'devId': widget.devId},
+      );
+      if (schema != null && mounted) {
+        final lines = schema.map((s) {
+          final m = Map<String, dynamic>.from(s);
+          return 'DP ${m['dpId']}: ${m['code']} [${m['mode']}] (${m['type']})';
+        }).join('\n');
+        debugPrint('=== DEVICE SCHEMA ===\n$lines');
+        showDialog(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: const Text('Device DP Schema'),
+            content: SingleChildScrollView(
+              child: Text(lines, style: const TextStyle(fontSize: 12)),
+            ),
+            actions: [
+              FilledButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('OK'),
+              ),
+            ],
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('Schema dump error: $e');
+    }
+  }
+
+  Future<void> _wifiCloudLock() async {
+    if (!_isOnline) {
+      _showSnackBar('Device is offline.');
+      return;
+    }
+
+    setState(() => _actionLoading = true);
+
+    try {
+      // Step 1: trigger lock request
+      await _lockExtras.invokeMethod('remoteSwitchLock', {
+        'devId': widget.devId,
+        'open': false,
+      });
+
+      _showSnackBar('Lock request sent...');
+    } catch (e) {
+      debugPrint('Lock trigger failed: $e');
+    }
+
+    // Step 2: approve request (IMPORTANT)
+    try {
+      await _lockExtras.invokeMethod('replyRemoteUnlock', {
+        'devId': widget.devId,
+        'allow': true,
+      });
+
+      _showSnackBar('Door locked successfully!');
+    } catch (e) {
+      debugPrint('Approval failed: $e');
+      _showSnackBar('Lock failed.');
+    }
+
     if (mounted) setState(() => _actionLoading = false);
   }
 
@@ -347,36 +1102,91 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
   Future<void> _getDynamicPassword() async {
     setState(() => _actionLoading = true);
     String? password;
-    String source = 'BLE';
+    String source = '';
 
+    debugPrint('=== GENERATE PASSWORD START ===');
+
+    // Strategy 1: WiFi dynamic password via our native channel (most reliable)
     try {
-      password = await _lockExtras.invokeMethod<String>(
-        'getDynamicPasswordBLE', {'devId': widget.devId});
+      debugPrint('Trying WiFi dynamic password (native)...');
+      final wifiPwd = await _lockExtras.invokeMethod<String>(
+        'getDynamicPasswordWiFi', {'devId': widget.devId});
+      if (wifiPwd != null && wifiPwd.isNotEmpty) {
+        password = wifiPwd;
+        source = 'WiFi';
+        debugPrint('WiFi dynamic password SUCCESS: $password');
+      }
     } catch (e) {
-      debugPrint("BLE dynamic password failed: $e");
+      debugPrint("WiFi dynamic password (native) failed: $e");
     }
 
+    // Strategy 2: WiFi dynamic password via SDK Flutter plugin
     if (password == null || password.isEmpty) {
       try {
-        source = 'WiFi';
+        debugPrint('Trying WiFi dynamic password (SDK plugin)...');
         final wifiPwd = await TuyaFlutterHaSdk.dynamicWifiLockPassword(
           devId: widget.devId);
-        password = wifiPwd?.toString();
+        if (wifiPwd != null && wifiPwd.toString().isNotEmpty) {
+          password = wifiPwd.toString();
+          source = 'WiFi';
+          debugPrint('WiFi dynamic password (SDK) SUCCESS: $password');
+        }
       } catch (e) {
-        debugPrint("WiFi dynamic password failed: $e");
+        debugPrint("WiFi dynamic password (SDK) failed: $e");
       }
     }
+
+    // Strategy 3: BLE dynamic password (needs BLE connection)
+    if (password == null || password.isEmpty) {
+      try {
+        debugPrint('Trying BLE dynamic password...');
+        password = await _lockExtras.invokeMethod<String>(
+          'getDynamicPasswordBLE', {'devId': widget.devId});
+        if (password != null && password.isNotEmpty) {
+          source = 'BLE';
+          debugPrint('BLE dynamic password SUCCESS: $password');
+        }
+      } catch (e) {
+        debugPrint("BLE dynamic password failed: $e");
+      }
+    }
+
+    // Strategy 4: Offline single-use password
+    if (password == null || password.isEmpty) {
+      try {
+        debugPrint('Trying offline single-use password...');
+        final result = await _lockExtras.invokeMethod<Map>(
+          'createOfflinePasswordBLE',
+          {
+            'devId': widget.devId,
+            'name': 'Quick OTP',
+            'type': 'single',
+          },
+        );
+        if (result != null && result['password'] != null) {
+          password = result['password'].toString();
+          source = 'Offline';
+          debugPrint('Offline password SUCCESS: $password');
+        }
+      } catch (e) {
+        debugPrint("Offline password failed: $e");
+      }
+    }
+
+    debugPrint('=== GENERATE PASSWORD END: ${password != null ? "got $source" : "ALL FAILED"} ===');
 
     if (mounted) setState(() => _actionLoading = false);
 
     if (password != null && password.isNotEmpty && mounted) {
       _showPasswordDialog(
-        title: 'Dynamic Password (OTP)',
+        title: source == 'Offline' ? 'One-Time Password' : 'Dynamic Password (OTP)',
         password: password,
-        subtitle: 'Enter on lock keypad. Valid 5 min. (via $source)',
+        subtitle: source == 'Offline'
+          ? 'Single use only. Enter on lock keypad.'
+          : 'Enter on lock keypad. Valid 5 min. (via $source)',
       );
     } else if (mounted) {
-      _showSnackBar('Could not generate OTP. Ensure Bluetooth is on.');
+      _showSnackBar('Could not generate password. Check lock connection.');
     }
   }
 
@@ -524,8 +1334,12 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _refreshTimer?.cancel();
+    _bleCheckTimer?.cancel();
     _dpEventSub?.cancel();
+    _remoteUnlockSub?.cancel();
+    _countdownTimer?.cancel();
     super.dispose();
   }
 
@@ -593,7 +1407,7 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
                       const SizedBox(width: 10),
                       Expanded(
                         child: OutlinedButton.icon(
-                          onPressed: _actionLoading ? null : _lockBLE,
+                          onPressed: _actionLoading ? null : _wifiCloudLock,
                           icon: const Icon(Icons.lock, size: 18),
                           label: const Text('Lock'),
                           style: OutlinedButton.styleFrom(
@@ -754,7 +1568,7 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
               children: [
                 Expanded(
                   child: OutlinedButton.icon(
-                    onPressed: _actionLoading ? null : _getOfflineSinglePassword,
+                    onPressed: _actionLoading ? null : _getDynamicPassword,
                     icon: const Icon(Icons.looks_one, size: 18),
                     label: const Text('One-Time'),
                     style: OutlinedButton.styleFrom(
@@ -764,7 +1578,7 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
                 const SizedBox(width: 8),
                 Expanded(
                   child: OutlinedButton.icon(
-                    onPressed: _actionLoading ? null : _getTimedTempPassword,
+                    onPressed: _actionLoading ? null : _getDynamicPassword, // call _getDynamicPassword, this function to one time password
                     icon: const Icon(Icons.timer, size: 18),
                     label: const Text('Timed'),
                     style: OutlinedButton.styleFrom(
@@ -785,7 +1599,7 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
     );
   }
 
-  // ── WiFi Remote Card ──
+  // ── WiFi Cloud Control Card ──
   Widget _buildWifiCard(ColorScheme cs) {
     return Card(
       child: Padding(
@@ -797,16 +1611,27 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
               children: [
                 Icon(Icons.wifi, color: cs.primary, size: 20),
                 const SizedBox(width: 8),
-                Text('WiFi Remote Unlock',
+                Text('WiFi Cloud Control',
                     style: Theme.of(context).textTheme.titleSmall?.copyWith(
                         fontWeight: FontWeight.w600)),
               ],
             ),
             const SizedBox(height: 8),
-            Text(
-              'Press remote unlock on the lock first, then approve here.',
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: cs.onSurfaceVariant),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    'Control lock via WiFi/LAN. Tries direct command first, '
+                    'then remote unlock approval.',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: cs.onSurfaceVariant),
+                  ),
+                ),
+                TextButton(
+                  onPressed: _dumpDeviceSchema,
+                  child: const Text('Debug DPs', style: TextStyle(fontSize: 11)),
+                ),
+              ],
             ),
             const SizedBox(height: 12),
             Row(
@@ -814,9 +1639,9 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
                 Expanded(
                   child: FilledButton.tonalIcon(
                     onPressed: (_actionLoading || !_isOnline)
-                        ? null : _wifiRemoteUnlock,
-                    icon: const Icon(Icons.check_circle_outline, size: 18),
-                    label: const Text('Approve'),
+                        ? null : _wifiCloudUnlock,
+                    icon: const Icon(Icons.lock_open, size: 18),
+                    label: const Text('Unlock'),
                     style: FilledButton.styleFrom(
                         minimumSize: const Size(0, 44)),
                   ),
@@ -825,9 +1650,9 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
                 Expanded(
                   child: OutlinedButton.icon(
                     onPressed: (_actionLoading || !_isOnline)
-                        ? null : _wifiRemoteDeny,
-                    icon: const Icon(Icons.block, size: 18),
-                    label: const Text('Deny'),
+                        ? null : _wifiCloudLock,
+                    icon: const Icon(Icons.lock, size: 18),
+                    label: const Text('Lock'),
                     style: OutlinedButton.styleFrom(
                         minimumSize: const Size(0, 44)),
                   ),
@@ -962,17 +1787,17 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
               ],
             ),
             const Divider(height: 16),
-            if (_dps.containsKey('8'))
+            if (_currentAlarm != null)
               _buildEventTile(
                 _LockEvent(
                   time: DateTime.now(),
                   type: _LockEventType.alarm,
-                  title: _alarmTitle(_dps['8'].toString()),
-                  detail: _dps['8'].toString(),
+                  title: _currentAlarm!,
+                  detail: '',
                 ),
                 isCurrent: true,
               ),
-            if (_recentEvents.isEmpty && !_dps.containsKey('8'))
+            if (_recentEvents.isEmpty && _currentAlarm == null)
               Padding(
                 padding: const EdgeInsets.symmetric(vertical: 8),
                 child: Center(
@@ -1013,9 +1838,13 @@ class _SmartLockScreenState extends State<SmartLockScreen> {
             _infoRow('State',
                 locked == true ? 'Closed' : locked == false ? 'Open' : 'Unknown'),
             _infoRow('Last Unlock', _lastUnlockMethod),
-            _infoRow('Volume', _dps['11']?.toString() ?? 'Unknown'),
-            _infoRow('Child Lock', _dps['17'] == true ? 'On' : 'Off'),
-            _infoRow('Auto Lock', _dps['19'] == true ? 'On' : 'Off'),
+            if (_batteryLevel != null)
+              _infoRow('Battery', '$_batteryLevel%'),
+            _infoRow('Volume', _dps['11']?.toString() ?? _dps['13']?.toString() ?? 'Unknown'),
+            _infoRow('Child Lock',
+                (_dps['17'] == true || _dps['40'] == true) ? 'On' : 'Off'),
+            _infoRow('Auto Lock',
+                (_dps['19'] == true || _dps['46'] == true) ? 'On' : 'Off'),
             if (mac != null && mac.isNotEmpty) _infoRow('MAC', mac),
             _infoRow('Cloud',
                 _deviceInfo?['isCloudOnline'] == true ? 'Connected' : 'Disconnected'),

@@ -70,9 +70,11 @@ dependencies {
     implementation("com.thingclips.smart:thingsmart:6.11.1")
     implementation(platform("com.thingclips.smart:thingsmart-BizBundlesBom:6.11.1"))
     implementation("com.thingclips.smart:thingsmart-ipcsdk:6.4.2")
+    implementation("com.thingclips.smart:thingsmart-security-mbedtls:6.4.0")
     implementation("com.thingclips.smart:thingsmart-bizbundle-device_activator")
     implementation("com.thingclips.smart:thingsmart-lock-sdk:6.0.1")
     implementation("com.facebook.soloader:soloader:0.10.4+")
+    implementation("androidx.appcompat:appcompat:1.6.1")
 }
 
 flutter {

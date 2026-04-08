@@ -42,6 +42,16 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
+        <!-- Doorbell video call Activity -->
+        <activity
+            android:name=".DoorbellCallActivity"
+            android:exported="false"
+            android:theme="@style/Theme.AppCompat.NoActionBar"
+            android:screenOrientation="portrait"
+            android:showOnLockScreen="true"
+            android:turnScreenOn="true"
+            android:configChanges="orientation|keyboardHidden|screenSize" />
+
         <!-- Tuya SDK credentials for BLE security handshake -->
         <meta-data
             android:name="THING_SMART_APPKEY"

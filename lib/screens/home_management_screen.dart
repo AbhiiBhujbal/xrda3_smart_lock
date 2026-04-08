@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:tuya_flutter_ha_sdk/tuya_flutter_ha_sdk.dart';
+import '../widgets/location_picker.dart';
 
 class HomeManagementScreen extends StatefulWidget {
   const HomeManagementScreen({super.key});
@@ -33,7 +34,7 @@ class _HomeManagementScreenState extends State<HomeManagementScreen> {
   }
 
   Future<void> _createHome() async {
-    final result = await showDialog<Map<String, String>>(
+    final result = await showDialog<Map<String, dynamic>>(
       context: context,
       builder: (ctx) => _CreateHomeDialog(),
     );
@@ -41,11 +42,11 @@ class _HomeManagementScreenState extends State<HomeManagementScreen> {
 
     try {
       await TuyaFlutterHaSdk.createHome(
-        name: result['name']!,
-        geoName: result['geoName'] ?? '',
-        rooms: result['rooms']?.split(',').map((r) => r.trim()).toList() ?? [],
-        latitude: 0.0,
-        longitude: 0.0,
+        name: result['name'] as String,
+        geoName: (result['geoName'] as String?) ?? '',
+        rooms: (result['rooms'] as String?)?.split(',').map((r) => r.trim()).toList() ?? [],
+        latitude: (result['latitude'] as double?) ?? 0.0,
+        longitude: (result['longitude'] as double?) ?? 0.0,
       );
       _showSnackBar('Home created successfully');
       _loadHomes();
@@ -80,7 +81,9 @@ class _HomeManagementScreenState extends State<HomeManagementScreen> {
   Future<void> _editHome(Map<String, dynamic> home) async {
     final homeId = home['homeId'] ?? home['id'];
     final nameController = TextEditingController(text: home['name'] ?? '');
-    final geoController = TextEditingController(text: home['geoName'] ?? '');
+    double lat = (home['latitude'] as num?)?.toDouble() ?? 0.0;
+    double lng = (home['longitude'] as num?)?.toDouble() ?? 0.0;
+    String geoName = home['geoName']?.toString() ?? '';
 
     final result = await showDialog<bool>(
       context: context,
@@ -94,9 +97,25 @@ class _HomeManagementScreenState extends State<HomeManagementScreen> {
               decoration: const InputDecoration(labelText: 'Home Name'),
             ),
             const SizedBox(height: 12),
-            TextField(
-              controller: geoController,
-              decoration: const InputDecoration(labelText: 'Location'),
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                icon: const Icon(Icons.place),
+                label: Text(geoName.isNotEmpty ? geoName : 'Set Location'),
+                onPressed: () async {
+                  final loc = await showLocationPicker(
+                    ctx,
+                    lat: lat,
+                    lng: lng,
+                    geoName: geoName,
+                  );
+                  if (loc != null) {
+                    lat = loc['latitude'] as double;
+                    lng = loc['longitude'] as double;
+                    geoName = loc['geoName'] as String;
+                  }
+                },
+              ),
             ),
           ],
         ),
@@ -113,9 +132,9 @@ class _HomeManagementScreenState extends State<HomeManagementScreen> {
       await TuyaFlutterHaSdk.updateHomeInfo(
         homeId: homeId,
         homeName: nameController.text,
-        geoName: geoController.text,
-        latitude: 0.0,
-        longitude: 0.0,
+        geoName: geoName,
+        latitude: lat,
+        longitude: lng,
       );
       _showSnackBar('Home updated');
       _loadHomes();
@@ -186,12 +205,17 @@ class _HomeManagementScreenState extends State<HomeManagementScreen> {
   }
 }
 
-class _CreateHomeDialog extends StatelessWidget {
-  final _nameController = TextEditingController();
-  final _geoController = TextEditingController();
-  final _roomsController = TextEditingController();
+class _CreateHomeDialog extends StatefulWidget {
+  @override
+  State<_CreateHomeDialog> createState() => _CreateHomeDialogState();
+}
 
-  _CreateHomeDialog();
+class _CreateHomeDialogState extends State<_CreateHomeDialog> {
+  final _nameController = TextEditingController();
+  final _roomsController = TextEditingController();
+  String _geoName = '';
+  double _lat = 0.0;
+  double _lng = 0.0;
 
   @override
   Widget build(BuildContext context) {
@@ -205,9 +229,27 @@ class _CreateHomeDialog extends StatelessWidget {
             decoration: const InputDecoration(labelText: 'Home Name'),
           ),
           const SizedBox(height: 12),
-          TextField(
-            controller: _geoController,
-            decoration: const InputDecoration(labelText: 'Location (optional)'),
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              icon: const Icon(Icons.place),
+              label: Text(_geoName.isNotEmpty ? _geoName : 'Set Location (optional)'),
+              onPressed: () async {
+                final loc = await showLocationPicker(
+                  context,
+                  lat: _lat,
+                  lng: _lng,
+                  geoName: _geoName,
+                );
+                if (loc != null) {
+                  setState(() {
+                    _lat = loc['latitude'] as double;
+                    _lng = loc['longitude'] as double;
+                    _geoName = loc['geoName'] as String;
+                  });
+                }
+              },
+            ),
           ),
           const SizedBox(height: 12),
           TextField(
@@ -229,8 +271,10 @@ class _CreateHomeDialog extends StatelessWidget {
             if (_nameController.text.isEmpty) return;
             Navigator.pop(context, {
               'name': _nameController.text,
-              'geoName': _geoController.text,
+              'geoName': _geoName,
               'rooms': _roomsController.text,
+              'latitude': _lat,
+              'longitude': _lng,
             });
           },
           child: const Text('Create'),
